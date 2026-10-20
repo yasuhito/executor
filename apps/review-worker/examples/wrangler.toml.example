@@ -1,0 +1,27 @@
+name = "REPLACE_WITH_WORKER_NAME"
+# Set your own account ID locally if Wrangler cannot infer the target account.
+# account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+main = "src/index.ts"
+compatibility_date = "2026-10-18"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "REVIEWS"
+class_name = "ReviewDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReviewDurableObject"]
+
+[[durable_objects.bindings]]
+name = "CREDENTIALS"
+class_name = "CredentialDurableObject"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CredentialDurableObject"]
+
+[vars]
+REPOSITORIES = '[{"fullName":"OWNER/REPOSITORY","id":123456789}]'
+OPENAI_MODEL = "REPLACE_WITH_A_MODEL_REPORTED_BY_BOOTSTRAP"

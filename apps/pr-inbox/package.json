@@ -1,0 +1,16 @@
+{
+  "name": "executor-pr-inbox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/check-deployment-identifiers.mjs && node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "apps": "0.0.1-beta.95"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

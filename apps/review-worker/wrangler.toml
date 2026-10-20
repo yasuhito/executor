@@ -1,0 +1,23 @@
+name = "executor-review-worker"
+main = "src/index.ts"
+compatibility_date = "2026-10-18"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Worker secrets: REVIEW_HMAC_SECRET, CREDENTIAL_BOOTSTRAP_SECRET, CREDENTIAL_ENCRYPTION_KEY
+
+[[durable_objects.bindings]]
+name = "REVIEWS"
+class_name = "ReviewDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReviewDurableObject"]
+
+[[durable_objects.bindings]]
+name = "CREDENTIALS"
+class_name = "CredentialDurableObject"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CredentialDurableObject"]
