@@ -1,0 +1,8 @@
+node_modules/
+apps/pr-inbox/config.local.json
+apps/review-worker/.dev.vars
+apps/review-worker/.dev.vars.*
+apps/review-worker/.env
+apps/review-worker/.env.*
+apps/review-worker/wrangler.local.toml
+apps/review-worker/.wrangler/

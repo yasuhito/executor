@@ -1,0 +1,17 @@
+{
+  "repositories": [
+    {
+      "fullName": "OWNER/REPOSITORY",
+      "id": 123456789
+    }
+  ],
+  "reviewWorkerUrl": "https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev",
+  "registration": {
+    "repository": "OWNER/REPOSITORY",
+    "hookId": 123456789,
+    "sourceSubscriptionId": "REPLACE_WITH_SOURCE_SUBSCRIPTION_ID",
+    "sourceAccountId": "REPLACE_WITH_SOURCE_ACCOUNT_ID",
+    "migrationRecordId": "REPLACE_WITH_UNIQUE_MIGRATION_RECORD_ID",
+    "fromCallbackUrl": "https://YOUR-EXECUTOR-ORIGIN/REPLACE_WITH_EXISTING_WEBHOOK_PATH"
+  }
+}

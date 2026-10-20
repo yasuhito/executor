@@ -1,0 +1,26 @@
+{
+  "name": "executor-review-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-durable": "1.3.0",
+    "agents": "0.28.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261018.1",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "wrangler": "4.151.1",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261012.1-beta"
+  }
+}
