@@ -1,0 +1,105 @@
+# Guarded registration migration - PAUSED
+
+This patch is not authority to deploy, activate, reconcile, mutate GitHub, or
+create/remove subscriptions. Captain must merge and separately authorize live work.
+Never print callback URLs, credentials, or stored identity hashes. Never retrieve
+the old hook secret. Cleanup DELETE never targets the sole approved incident hook;
+this does not prohibit an explicitly authorized registration update. Adopted hooks
+are also excluded from cleanup deletion.
+
+## Supported configuration and local checks
+
+Use `examples/config.example.json`: `repositories`, `reviewWorkerUrl`, `dryRun: true`,
+and **nested** `registration` containing `repository`, `hookId`,
+`sourceSubscriptionId`, `sourceAccountId`, `migrationRecordId`, `fromCallbackUrl`.
+The previous flat migration configuration is not this declaration's schema.
+Keep installation values in host configuration, never in this document/source.
+The replacement subscription must differ from the source. Original and target
+callbacks must be canonical HTTPS URLs on the same origin, with distinct paths.
+The account and repository numeric identity must match the approved configuration.
+
+Run locally: `npm test` and `npm run typecheck` in this app directory.
+New migration `0006_guarded_hook_ownership.sql` is additive; do not edit applied
+migrations. It does not backfill legacy ownership or grant deletion rights.
+
+## Read-only diagnostics
+
+- `registrationConfigurationDiagnostic({ configJson })` validates proposed config
+  JSON, returning only fixed codes and field names. Supply config only, **never
+  credentials**. It checks structure, not host account/callback/secret binding.
+- `registrationDetail({ recordId })` reads the latest recorded attempt detail;
+  `recordId` is `registration.migrationRecordId`, not the Executor subscription ID.
+  Possible details include `invalid_input/input`, `identity_hash_failed/identity`,
+  `claim_failed/storage`, `registration_blocked/storage`, `preflight_failed/hook`,
+  `mutation_unresolved/hook`, or `complete/hook`.
+- `replacementRegistrationDiagnostic({ recordId })` uses the same
+  `registration.migrationRecordId` and independently reads the durable reservation
+  phase. `patching` means **mutation outcome unresolved**, including
+  POST; no automatic retry is safe. A later blocked attempt may replace the detail
+  code but does not clear this reservation or the repository lock.
+
+These queries never return raw config, callbacks, hashes, fingerprints, or secrets.
+`not_recorded`, `before_reservation`, and `diagnostic_unavailable` are not success:
+Executor may reject the schema before app code runs; SQL diagnostic writes can
+also fail. Configuration preflight is the read-only fallback for schema rejection.
+Executor's `webhooks.sources`/`webhooks.get` expose a closed `failure` enum; this
+patch **does not change that platform field** or add field-level platform errors.
+
+## Registration and cleanup contract
+
+Registration verifies repository full name and numeric ID, paginates all hook
+records, and refuses duplicate targets, wrong IDs, wrong visible settings, or an
+approved ID at a different URL. A match may be at the exact original or target
+callback, but must have the approved hook ID. Adoption GETs that ID, PATCHes only
+`url` and the host-supplied `secret` through the config endpoint, then GETs readback.
+Only absence of both matching URLs and the approved hook ID allows one POST with
+`web`/active/`pull_request`/JSON/secure-TLS settings. It never falls back to POST
+following a failed GET/PATCH/readback. A completed identical retry only reads the
+saved hook ID; changed identity is rejected. Lost mutation responses require
+operator investigation, not a new record ID or clearing a lock.
+
+References are durable and locks cover the entire repository across linked
+accounts. An interrupted lock intentionally has no expiry: do not manually clear
+it without proving the external outcome. Cleanup releases only its own reference;
+shared hooks are not deleted. Adopted and unknown/legacy hooks are never deleted.
+Only a hook created here with a sole live reference can be deleted; repeated
+cleanup uses a retained retirement record and does not repeat DELETE. This cannot
+protect against old deployed callbacks or independent external administrators.
+
+## Live retirement sequence: blocked before any mutation
+
+The local official docs were read in full:
+
+- `executor-docs/webhooks.md`, “Webhook subscriptions”: “Subscriptions pin their
+  original version and account IDs; recreate to upgrade.” It also says removal
+  precedes app/account deletion and cleanup is retried by reconcile.
+- `executor-docs/deploy.md`, “Version activation” text (lines 466–478): activation
+  “re-registers each webhook source's subscriptions on it in the background” and
+  `apps.activate` takes `version`/`expectedVersion`. It does not specify whether
+  re-registration invokes an old unregister callback or guarantee every pinned
+  subscription is repointed without cleanup.
+
+These statements do **not** prove a preserve-only activation path. Existing
+subscriptions remain on old versions in this incident despite activation/reconcile;
+the old unregister callback sends GitHub DELETE. New code cannot intercept it.
+There is no documented skip-unregister/force-retire operation. Do not invent one,
+and do not use remove/recreate, account unlink, app deletion, or old-version
+reconcile as a workaround. Stopped subscriptions also remain unsafe to remove.
+
+The exact safe sequence currently supported is:
+
+1. Review/merge the patch; keep `dryRun: true`. No live operations in this task.
+2. Perform only read-only configuration/status checks under Captain authorization.
+3. **STOP before activation, reconciliation, registration, or retirement.** Obtain
+   an authoritative host contract (or audited host implementation plus an isolated
+   non-production lifecycle test) proving how *each existing subscription* can
+   move to preserve-only callbacks without executing its original unregister.
+4. Captain must approve a concrete host-supported sequence using that evidence.
+   Verify pinned versions and callbacks read-only after any separately authorized
+   transition, before removing anything. If evidence is unavailable, retain the old
+   subscriptions indefinitely; there is no supported safe retirement recipe yet.
+
+Even a new replacement subscription can rotate the shared hook's URL/secret and
+interrupt old deliveries, so it is not an alternative way past this pause. This
+patch supplies self-healing code, not proof that the host will run it for the
+currently pending/pinned registrations.
