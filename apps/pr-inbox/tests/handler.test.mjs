@@ -3,7 +3,13 @@ import { createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { githubWebhook, readHookMigrationDiagnostic, readRecentReceipts } from "../index.ts";
+import {
+  githubWebhook,
+  readHookMigrationDiagnostic,
+  readRecentReceipts,
+  readRegistrationDetail,
+  diagnoseRegistrationConfiguration,
+} from "../index.ts";
 
 const fixtureSecret = randomBytes(32).toString("base64url");
 const fixtureToken = randomBytes(32).toString("hex");
@@ -18,6 +24,7 @@ async function createContext() {
     "0003_url_only_review_telegram_pending.sql",
     "0004_multi_repository_config.sql",
     "0005_dry_run_mode.sql",
+    "0006_guarded_hook_ownership.sql",
   ]) {
     const migration = await readFile(
       new URL(`../migrations/${migrationName}`, import.meta.url),
@@ -776,6 +783,10 @@ async function registrationFixture({
       const url = new URL(input);
       const method = init.method ?? "GET";
       const body = init.body === undefined ? undefined : JSON.parse(init.body);
+      if (url.pathname === "/repos/example-owner/example-repository" && method === "GET")
+        return Response.json({ id: targetRepository.id, full_name: targetRepository.full_name });
+      if (url.pathname === "/repos/example-owner/example-repository/hooks" && method === "GET")
+        return Response.json([currentHook]);
       calls.push({ method, path: url.pathname, body });
       if (url.pathname === approvedHookPath && method === "GET") {
         getCount += 1;
@@ -1162,7 +1173,10 @@ for (const [setting, hook] of mismatchedHooks) {
       },
       {
         outcome: { error: "GitHub webhook replacement failed; stop for operator recovery." },
-        methods: ["GET"],
+        // Identity/list validation can now refuse before the exact-hook GET.
+        methods: ["returned hook ID", "original callback", "missing TLS setting"].includes(setting)
+          ? []
+          : ["GET"],
       },
     );
   });
@@ -1318,7 +1332,7 @@ test("registration preserves GitHub's numeric secure TLS setting without sending
   );
 });
 
-test("unregister refuses without contacting GitHub", async () => {
+test("unregister refuses unknown ownership without contacting GitHub", async () => {
   const fixture = await registrationFixture();
   let message;
   try {
@@ -1333,8 +1347,378 @@ test("unregister refuses without contacting GitHub", async () => {
   assert.deepEqual(
     { message, calls: fixture.calls },
     {
-      message: "GitHub webhook removal is outside the approved update-only scope.",
+      message: "cleanup_unresolved",
       calls: [],
     },
   );
+});
+
+async function selfHealingFixture({
+  hooks = [configuredHook()],
+  repoId = targetRepository.id,
+  repoFullName = targetRepository.full_name,
+  loseCreateResponse = false,
+  duplicateReadback = false,
+} = {}) {
+  const { context } = await createContext();
+  const calls = [];
+  const records = structuredClone(hooks);
+  let currentRepoFullName = repoFullName;
+  context.fetch = async (input, init) => {
+    const url = new URL(input);
+    const method = init.method;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path: url.pathname, body });
+    const base = "/repos/example-owner/example-repository";
+    const pathname = url.pathname.toLowerCase();
+    if (pathname === base) return Response.json({ id: repoId, full_name: currentRepoFullName });
+    if (method === "GET" && pathname === `${base}/hooks`) return Response.json(records);
+    if (method === "POST" && pathname === `${base}/hooks`) {
+      const hook = { ...body, id: approvedHookId + 10 };
+      records.push(hook);
+      if (loseCreateResponse) throw new Error(`private ${fixtureSecret} ${replacementCallbackUrl}`);
+      return Response.json(hook, { status: 201 });
+    }
+    const id = Number(
+      url.pathname
+        .split("/")
+        .filter(Boolean)
+        .at(method === "PATCH" ? -2 : -1),
+    );
+    const hook = records.find((record) => record.id === id);
+    if (!hook) return new Response(null, { status: 404 });
+    if (method === "GET")
+      return Response.json(
+        duplicateReadback && hook.config.url === replacementCallbackUrl
+          ? { ...hook, id: id + 1 }
+          : hook,
+      );
+    if (method === "PATCH") {
+      assert.deepEqual(Object.keys(body).sort(), ["secret", "url"]);
+      hook.config.url = body.url;
+      return Response.json({});
+    }
+    if (method === "DELETE") {
+      records.splice(records.indexOf(hook), 1);
+      return new Response(null, { status: 204 });
+    }
+    throw new Error("unexpected mock request");
+  };
+  return {
+    context,
+    calls,
+    records,
+    setRepoFullName(fullName) {
+      currentRepoFullName = fullName;
+    },
+  };
+}
+
+test("exact repository and target hook adoption uses GET/PATCH and never POST/DELETE", async () => {
+  const fixture = await selfHealingFixture({
+    hooks: [configuredHook({ config: { url: replacementCallbackUrl } })],
+  });
+  assert.deepEqual(await githubWebhook.register(fixture.context, registrationInput()), {
+    hookId: approvedHookId,
+  });
+  assert.deepEqual(
+    fixture.calls.map(({ method }) => method),
+    ["GET", "GET", "GET", "PATCH", "GET"],
+  );
+  assert.equal(fixture.calls[2].path, approvedHookPath);
+  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+    code: "complete",
+    field: "hook",
+  });
+});
+
+test("absent target creates exactly once; retry reads the saved new ID without POST", async () => {
+  const fixture = await selfHealingFixture({ hooks: [] });
+  const first = await githubWebhook.register(fixture.context, registrationInput());
+  const second = await githubWebhook.register(fixture.context, registrationInput());
+  assert.deepEqual(first, { hookId: approvedHookId + 10 });
+  assert.deepEqual(second, first);
+  assert.equal(fixture.calls.filter(({ method }) => method === "POST").length, 1);
+  assert.equal(
+    fixture.calls.filter(({ method }) => method === "PATCH" || method === "DELETE").length,
+    0,
+  );
+});
+
+test("completed retry restores missing ownership only as an adopted hook", async () => {
+  const fixture = await selfHealingFixture({ hooks: [] });
+  const state = await githubWebhook.register(fixture.context, registrationInput());
+  fixture.context.sql.exec(
+    "DELETE FROM github_hook_owners WHERE resource = ? AND subscription_id = ?",
+    `github-repository:${targetRepository.id}`,
+    replacementSubscriptionId,
+  );
+
+  assert.deepEqual(await githubWebhook.register(fixture.context, registrationInput()), state);
+  const owner = fixture.context.sql
+    .exec(
+      "SELECT hook_id, created_here FROM github_hook_owners WHERE resource = ? AND subscription_id = ?",
+      `github-repository:${targetRepository.id}`,
+      replacementSubscriptionId,
+    )
+    .toArray()[0];
+  assert.equal(owner.hook_id, state.hookId);
+  assert.equal(owner.created_here, 0);
+  await githubWebhook.unregister(fixture.context, { ...registrationInput(), state });
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+});
+
+test("preflight release SQL failure does not strand the hook lock or leak the error", async () => {
+  const fixture = await selfHealingFixture({ repoId: targetRepository.id + 1 });
+  const originalExec = fixture.context.sql.exec;
+  fixture.context.sql.exec = function (statement, ...parameters) {
+    if (statement.includes("SET lease_until = 0")) throw new Error(fixtureSecret);
+    return originalExec.call(this, statement, ...parameters);
+  };
+
+  const outcome = await registrationOutcome(fixture.context, registrationInput());
+  fixture.context.sql.exec = originalExec;
+  assert.equal(outcome.error, "GitHub webhook replacement failed; stop for operator recovery.");
+  assert.equal(
+    fixture.context.sql.exec("SELECT count(*) AS count FROM github_hook_locks").toArray()[0].count,
+    0,
+  );
+  assert.equal(JSON.stringify(outcome).includes(fixtureSecret), false);
+});
+
+for (const [name, options] of [
+  ["duplicate targets", { hooks: [configuredHook(), configuredHook({ id: approvedHookId + 1 })] }],
+  ["wrong target ID", { hooks: [configuredHook({ id: approvedHookId + 1 })] }],
+  [
+    "approved ID at wrong URL",
+    { hooks: [configuredHook({ config: { url: "https://other.invalid/hook" } })] },
+  ],
+  ["wrong repository ID", { repoId: targetRepository.id + 1 }],
+]) {
+  test(`self healing refuses ${name} without POST/PATCH/DELETE`, async () => {
+    const fixture = await selfHealingFixture(options);
+    const outcome = await registrationOutcome(fixture.context, registrationInput());
+    assert.ok(outcome.error);
+    assert.ok(fixture.calls.every(({ method }) => method === "GET"));
+    assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+      code: "preflight_failed",
+      field: "hook",
+    });
+  });
+}
+
+test("ambiguous creation and readback stop retries and leak no private data", async () => {
+  for (const options of [{ hooks: [], loseCreateResponse: true }, { duplicateReadback: true }]) {
+    const fixture = await selfHealingFixture(options);
+    const outcomes = [
+      await registrationOutcome(fixture.context, registrationInput()),
+      await registrationOutcome(fixture.context, registrationInput()),
+    ];
+    assert.ok(outcomes.every((outcome) => outcome.error));
+    assert.equal(
+      fixture.calls.filter(({ method }) => method === "POST" || method === "PATCH").length,
+      1,
+    );
+    const diagnostic = readRegistrationDetail(fixture.context.sql, diagnosticReservationId);
+    const printed = JSON.stringify([outcomes, diagnostic]);
+    for (const privateValue of [
+      fixtureSecret,
+      fixtureToken,
+      replacementCallbackUrl,
+      approvedOriginalCallbackUrl,
+    ])
+      assert.equal(printed.includes(privateValue), false);
+    assert.equal(
+      fixture.calls.some(({ method }) => method === "DELETE"),
+      false,
+    );
+  }
+});
+
+test("adopted hooks are preserved even with a sole known owner", async () => {
+  const fixture = await selfHealingFixture();
+  const state = await githubWebhook.register(fixture.context, registrationInput());
+  await githubWebhook.unregister(fixture.context, { ...registrationInput(), state });
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+});
+
+test("shared created hook skips deletion until its last proven owner unregisters", async () => {
+  const fixture = await selfHealingFixture({ hooks: [] });
+  const state = await githubWebhook.register(fixture.context, registrationInput());
+  // A second same-target registration uses a distinct durable migration record.
+  const other = registrationInput({
+    subscriptionId: "whk_test-shared-owner",
+    config: withRegistration({ hookId: state.hookId, migrationRecordId: "shared-record" }),
+  });
+  assert.deepEqual(await githubWebhook.register(fixture.context, other), state);
+  await githubWebhook.unregister(fixture.context, { ...registrationInput(), state });
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+  await githubWebhook.unregister(fixture.context, { ...other, state });
+  assert.equal(fixture.calls.filter(({ method }) => method === "DELETE").length, 1);
+});
+
+test("shared owner references use repository ID across case aliases", async () => {
+  const fixture = await selfHealingFixture({ hooks: [] });
+  const firstState = await githubWebhook.register(fixture.context, registrationInput());
+  const alias = "Example-Owner/Example-Repository";
+  fixture.setRepoFullName(alias);
+  const baseConfig = replacementConfig();
+  const secondConfig = replacementConfig({
+    repositories: [{ fullName: alias, id: targetRepository.id }],
+    registration: {
+      ...baseConfig.registration,
+      repository: alias,
+      hookId: firstState.hookId,
+      migrationRecordId: "case-alias-record",
+    },
+  });
+  const secondInput = registrationInput({
+    subscriptionId: "whk_test-case-alias",
+    config: secondConfig,
+  });
+  const secondState = await githubWebhook.register(fixture.context, secondInput);
+
+  await githubWebhook.unregister(fixture.context, {
+    ...registrationInput(),
+    state: firstState,
+  });
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+  await githubWebhook.unregister(fixture.context, { ...secondInput, state: secondState });
+  assert.equal(fixture.calls.filter(({ method }) => method === "DELETE").length, 1);
+});
+
+test("another account cannot race an unresolved hook mutation or delete its reference", async () => {
+  const fixture = await selfHealingFixture({ duplicateReadback: true });
+  await registrationOutcome(fixture.context, registrationInput());
+  const other = registrationInput({
+    subscriptionId: "whk_test-other",
+    account: { ...registrationInput().account, id: "another-account" },
+    config: withRegistration({
+      sourceAccountId: "another-account",
+      migrationRecordId: "other-record",
+    }),
+  });
+  assert.ok((await registrationOutcome(fixture.context, other)).error);
+  await assert.rejects(
+    githubWebhook.unregister(fixture.context, {
+      ...registrationInput(),
+      state: { hookId: approvedHookId },
+    }),
+    /cleanup_blocked/,
+  );
+  assert.equal(fixture.calls.filter(({ method }) => method === "PATCH").length, 1);
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+});
+
+test("configuration preflight distinguishes flat migration config and nested fields without values", () => {
+  assert.deepEqual(diagnoseRegistrationConfiguration(replacementConfig()), {
+    code: "configuration_valid",
+    field: null,
+  });
+  assert.deepEqual(
+    diagnoseRegistrationConfiguration({
+      ...replacementConfig(),
+      registration: undefined,
+      ...replacementConfig().registration,
+    }),
+    { code: "invalid_configuration", field: "registration" },
+  );
+  assert.deepEqual(
+    diagnoseRegistrationConfiguration(withRegistration({ fromCallbackUrl: fixtureSecret })),
+    { code: "invalid_configuration", field: "registration.fromCallbackUrl" },
+  );
+  assert.deepEqual(diagnoseRegistrationConfiguration(withRegistration({ hookId: 0 })), {
+    code: "invalid_configuration",
+    field: "registration.hookId",
+  });
+});
+
+test("invalid input, hashing and SQL claim errors have distinct sanitized detail", async () => {
+  const fixture = await selfHealingFixture();
+  await registrationOutcome(fixture.context, registrationInput({ secret: "" }));
+  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+    code: "invalid_input",
+    field: "input",
+  });
+  const originalDigest = crypto.subtle.digest;
+  crypto.subtle.digest = async () => {
+    throw new Error(fixtureSecret);
+  };
+  try {
+    await registrationOutcome(fixture.context, registrationInput());
+    assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+      code: "identity_hash_failed",
+      field: "identity",
+    });
+  } finally {
+    crypto.subtle.digest = originalDigest;
+  }
+  const originalTransaction = fixture.context.sql.transaction;
+  fixture.context.sql.transaction = () => {
+    throw new Error(fixtureSecret);
+  };
+  await registrationOutcome(fixture.context, registrationInput());
+  fixture.context.sql.transaction = originalTransaction;
+  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+    code: "claim_failed",
+    field: "storage",
+  });
+  assert.equal(fixture.calls.length, 0);
+});
+
+test("orphan cleanup is retry-idempotent and a retired registration cannot revive it", async () => {
+  const fixture = await selfHealingFixture({ hooks: [] });
+  const state = await githubWebhook.register(fixture.context, registrationInput());
+  await githubWebhook.unregister(fixture.context, { ...registrationInput(), state });
+  await githubWebhook.unregister(fixture.context, { ...registrationInput(), state });
+  assert.equal(fixture.calls.filter(({ method }) => method === "DELETE").length, 1);
+  assert.ok((await registrationOutcome(fixture.context, registrationInput())).error);
+});
+
+test("permanently preserved incident hook is never deleted even with creation provenance", async () => {
+  const fixture = await selfHealingFixture();
+  fixture.context.sql.exec(
+    `INSERT INTO github_hook_owners
+    (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here)
+    VALUES (?, ?, ?, '', '', 1)`,
+    `github-repository:${targetRepository.id}`,
+    700112653,
+    replacementSubscriptionId,
+  );
+  await githubWebhook.unregister(fixture.context, {
+    ...registrationInput(),
+    state: { hookId: 700112653 },
+  });
+  assert.equal(fixture.calls.length, 0);
+});
+
+test("registration details are read-only and refuse unrecognized stored values", () => {
+  let calls = 0;
+  const result = readRegistrationDetail(
+    {
+      exec(statement) {
+        calls += 1;
+        assert.equal(statement, "SELECT code, field FROM github_hook_details WHERE record_id = ?");
+        return { toArray: () => [{ code: fixtureSecret, field: replacementCallbackUrl }] };
+      },
+    },
+    "record",
+  );
+  assert.deepEqual(result, { code: "diagnostic_unavailable", field: null });
+  assert.equal(calls, 1);
 });

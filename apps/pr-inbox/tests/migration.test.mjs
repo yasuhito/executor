@@ -176,3 +176,22 @@ test("dry-run migration defaults existing configurations to safe and stores expl
       .run(),
   );
 });
+
+test("guarded registration migration preserves legacy registrations and adds independent ownership", async () => {
+  const database = new DatabaseSync(":memory:");
+  for (const name of [
+    "0001_webhook_receipts.sql",
+    "0002_dependabot_review_queue.sql",
+    "0003_url_only_review_telegram_pending.sql",
+    "0004_multi_repository_config.sql",
+    "0005_dry_run_mode.sql",
+  ])
+    database.exec(await migration(name));
+  database.exec(
+    "INSERT INTO github_hook_registrations (subscription_id, hook_id) VALUES ('legacy', 42)",
+  );
+  database.exec(await migration("0006_guarded_hook_ownership.sql"));
+  assert.equal(database.prepare("SELECT hook_id FROM github_hook_registrations").get().hook_id, 42);
+  assert.equal(database.prepare("SELECT count(*) AS count FROM github_hook_owners").get().count, 0);
+  database.close();
+});
