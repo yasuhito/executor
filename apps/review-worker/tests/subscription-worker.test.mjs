@@ -86,6 +86,7 @@ async function setup(t, bindings = {}) {
   const githubRequests = [];
   const options = {
     modules: true,
+    unsafeInspectDurableObjects: true,
     modulesRoot: dir,
     scriptPath,
     compatibilityDate: "2026-10-18",
@@ -417,6 +418,29 @@ test("wrong secret, invalid credential, replay, and public resolver are rejected
   assert.deepEqual(statuses, [401, 400, 400, 200, 409, 404]);
 });
 
+test("credential decryption failures return a safe operation error", {
+  timeout: 60_000,
+}, async (t) => {
+  const s = await setup(t);
+  await signed(s.mf, "/v1/credentials/import", { provider: "openai", credential: credential() });
+
+  const storage = await s.mf.unsafeGetDurableObjectStorage("", "CredentialDurableObject", {
+    name: "installation",
+  });
+  await storage.exec(
+    "UPDATE credential SET envelope = ? WHERE id = 1",
+    JSON.stringify({ version: 1, nonce: Array(12).fill(0), ciphertext: Array(32).fill(0) }),
+  );
+
+  const response = await signed(s.mf, "/v1/credentials/status", {});
+  assert.deepEqual(
+    [response.status, await response.json()],
+    [503, { status: "credential_operation_failed", errorCode: "crypto_operation_failed" }],
+  );
+  assert.match(JSON.stringify(s.logs), /OperationError/);
+  assert.doesNotMatch(JSON.stringify(s.logs), /fake-initial-(access|refresh)/);
+});
+
 test("unrecoverable OAuth refresh failure requires reauthentication and does not loop", {
   timeout: 90_000,
 }, async (t) => {
@@ -480,7 +504,11 @@ test("missing encryption key rejects import without reporting secrets", {
 
   assert.deepEqual(
     [response.status, await response.json(), s.stats()],
-    [503, { status: "credential_operation_failed" }, { refreshes: 0, requests: 0 }],
+    [
+      503,
+      { status: "credential_operation_failed", errorCode: "invalid_encryption_binding" },
+      { refreshes: 0, requests: 0 },
+    ],
   );
 });
 
@@ -495,7 +523,11 @@ test("invalid encryption binding rejects import without reporting secrets", {
 
   assert.deepEqual(
     [response.status, await response.json(), s.stats()],
-    [503, { status: "credential_operation_failed" }, { refreshes: 0, requests: 0 }],
+    [
+      503,
+      { status: "credential_operation_failed", errorCode: "invalid_encryption_binding" },
+      { refreshes: 0, requests: 0 },
+    ],
   );
 });
 
