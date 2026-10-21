@@ -53,10 +53,16 @@ approved ID at a different URL. A match may be at the exact original or target
 callback, but must have the approved hook ID. Adoption GETs that ID, PATCHes only
 `url` and the host-supplied `secret` through the config endpoint, then GETs readback.
 Only absence of both matching URLs and the approved hook ID allows one POST with
-`web`/active/`pull_request`/JSON/secure-TLS settings. It never falls back to POST
-following a failed GET/PATCH/readback. A completed identical retry only reads the
-saved hook ID; changed identity is rejected. Lost mutation responses require
-operator investigation, not a new record ID or clearing a lock.
+`web`/active/`pull_request`/JSON/secure-TLS settings. A completed identical retry
+verifies its current target. A 404 for that hook triggers a fresh exhaustive list.
+If the fully paginated list has no original or target callback and neither the
+recorded nor approved hook ID exists at another URL, the same registration may
+recreate the hook only when no other live owner references either missing ID.
+The migration is durably marked `patching` before POST; success requires GET
+readback and updates both the owner row and returned subscription state with the
+new hook ID. An ambiguous POST or readback remains
+unresolved and blocks retry. Changed identity is rejected. Lost mutation responses
+require operator investigation, not a new record ID or clearing a lock.
 
 References are durable and locks cover the entire repository across linked
 accounts. An interrupted lock intentionally has no expiry: do not manually clear

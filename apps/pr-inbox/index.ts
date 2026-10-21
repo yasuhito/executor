@@ -611,7 +611,10 @@ function claimHookMigration(
   identity: HookMigrationIdentity,
   recordId: string,
   hookId: number,
-): { kind: "acquired"; state: HookMigrationState } | { kind: "complete" } | { kind: "blocked" } {
+):
+  | { kind: "acquired"; state: HookMigrationState }
+  | { kind: "complete"; state: HookMigrationState }
+  | { kind: "blocked" } {
   const now = Date.now();
   const state: HookMigrationState = {
     version: 1,
@@ -652,7 +655,7 @@ function claimHookMigration(
     ) {
       return { kind: "blocked" };
     }
-    if (current.phase === "complete") return { kind: "complete" };
+    if (current.phase === "complete") return { kind: "complete", state: current };
     if (current.phase === "patching" || row.lease_until > now) {
       return { kind: "blocked" };
     }
@@ -672,7 +675,7 @@ function claimHookMigration(
   });
 }
 
-function startHookMigrationPatch(
+function startHookMigrationMutation(
   sql: Sql,
   state: HookMigrationState,
   recordId: string,
@@ -820,6 +823,7 @@ async function verifySavedHook(
   return hook.id;
 }
 
+/** A 404 triggers a fresh exhaustive list; it is not sufficient by itself to create a hook. */
 async function readApprovedHook(
   context: HookContext,
   account: GitHubAccount,
@@ -827,7 +831,7 @@ async function readApprovedHook(
   hookId: number,
   callbackUrl: string,
   signal: AbortSignal,
-): Promise<number> {
+): Promise<number | null> {
   const response = await githubRequest(
     context,
     account,
@@ -835,6 +839,7 @@ async function readApprovedHook(
     "GET",
     signal,
   );
+  if (response.status === 404) return null;
   requireStatus(response, 200);
   return verifySavedHook(response, hookId, callbackUrl);
 }
@@ -1007,6 +1012,46 @@ function saveOwner(
   );
 }
 
+function replaceRecreatedOwner(
+  sql: Sql,
+  resource: string,
+  previousHookId: number | null,
+  hookId: number,
+  identity: HookMigrationIdentity,
+): boolean {
+  return sql.transaction((transaction) => {
+    if (previousHookId === null) {
+      return (
+        transaction.exec(
+          `INSERT INTO github_hook_owners
+            (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here)
+           VALUES (?, ?, ?, ?, ?, 1)
+           ON CONFLICT(resource, subscription_id) DO NOTHING`,
+          resource,
+          hookId,
+          identity.subscriptionId,
+          identity.replacementCallbackHash,
+          identity.secretFingerprint,
+        ).rowsWritten === 1
+      );
+    }
+    return (
+      transaction.exec(
+        `UPDATE github_hook_owners
+         SET hook_id = ?, created_here = 1
+         WHERE resource = ? AND subscription_id = ? AND hook_id = ?
+           AND callback_hash = ? AND secret_fingerprint = ? AND released = 0`,
+        hookId,
+        resource,
+        identity.subscriptionId,
+        previousHookId,
+        identity.replacementCallbackHash,
+        identity.secretFingerprint,
+      ).rowsWritten === 1
+    );
+  });
+}
+
 /** Fully paginate; never infer absence from a truncated listing. */
 async function discoverHooks(
   context: HookContext,
@@ -1079,7 +1124,7 @@ const githubWebhook = {
     const lockToken = crypto.randomUUID();
     let claim:
       | { kind: "acquired"; state: HookMigrationState }
-      | { kind: "complete" }
+      | { kind: "complete"; state: HookMigrationState }
       | { kind: "blocked" };
     try {
       claim = claimHookMigration(
@@ -1100,6 +1145,7 @@ const githubWebhook = {
     const signal = apiSignal(context.signal);
     if (claim.kind === "complete") {
       let locked = false;
+      let mutationStarted = false;
       try {
         locked = lockHook(context.sql, resource, lockToken);
         if (!locked) throw new Error("hook_busy");
@@ -1120,14 +1166,11 @@ const githubWebhook = {
         )
           throw new Error("repository_mismatch");
 
-        const matches = (
-          await discoverHooks(context, account, registration.repository, signal)
-        ).filter(
+        let hooks = await discoverHooks(context, account, registration.repository, signal);
+        let matches = hooks.filter(
           (hook) =>
             hook.callbackUrl === callbackUrl || hook.callbackUrl === registration.fromCallbackUrl,
         );
-        if (matches.length !== 1 || matches[0].callbackUrl !== callbackUrl)
-          throw new Error("ambiguous_hook");
         const owner = context.sql
           .exec(
             `SELECT hook_id, callback_hash, secret_fingerprint, released
@@ -1137,28 +1180,115 @@ const githubWebhook = {
           )
           .toArray()[0];
         if (
+          matches.length > 1 ||
           owner?.released === 1 ||
           (owner !== undefined &&
             (owner.callback_hash !== identity.replacementCallbackHash ||
               owner.secret_fingerprint !== identity.secretFingerprint ||
-              Number(owner.hook_id) !== matches[0].id))
+              !Number.isSafeInteger(Number(owner.hook_id)) ||
+              Number(owner.hook_id) < 1))
         ) {
           throw new Error("registration_owner_mismatch");
         }
-        const hookId = await readApprovedHook(
+        if (matches.length === 1) {
+          if (
+            matches[0].callbackUrl !== callbackUrl ||
+            (owner !== undefined && Number(owner.hook_id) !== matches[0].id)
+          ) {
+            throw new Error("ambiguous_hook");
+          }
+          const existingHookId = await readApprovedHook(
+            context,
+            account,
+            registration.repository,
+            matches[0].id,
+            callbackUrl,
+            signal,
+          );
+          if (existingHookId !== null) {
+            if (owner === undefined)
+              saveOwner(context.sql, resource, existingHookId, identity, false);
+            saveConfiguredRepositories(context.sql, subscriptionId, config);
+            recordDetail(context.sql, registration.migrationRecordId, "complete", "hook");
+            unlockHook(context.sql, resource, lockToken);
+            return { hookId: existingHookId };
+          }
+          hooks = await discoverHooks(context, account, registration.repository, signal);
+          matches = hooks.filter(
+            (hook) =>
+              hook.callbackUrl === callbackUrl || hook.callbackUrl === registration.fromCallbackUrl,
+          );
+          if (matches.length !== 0) throw new Error("hook_reappeared_during_recovery");
+        }
+
+        const previousHookId = owner === undefined ? null : Number(owner.hook_id);
+        const recordedHookIds = new Set([
+          registration.hookId,
+          ...(previousHookId === null ? [] : [previousHookId]),
+        ]);
+        if (hooks.some((hook) => recordedHookIds.has(hook.id)))
+          throw new Error("recorded_hook_mismatch");
+        const otherOwner = context.sql
+          .exec(
+            `SELECT subscription_id FROM github_hook_owners
+             WHERE resource = ? AND released = 0 AND subscription_id <> ?
+               AND (hook_id = ? OR hook_id = ?)`,
+            resource,
+            subscriptionId,
+            registration.hookId,
+            previousHookId ?? registration.hookId,
+          )
+          .toArray()[0];
+        if (otherOwner !== undefined) throw new Error("hook_has_other_owner");
+
+        const patching = startHookMigrationMutation(
+          context.sql,
+          claim.state,
+          registration.migrationRecordId,
+        );
+        if (patching === null) throw new Error("The approved webhook replacement lease was lost.");
+        mutationStarted = true;
+        const created = await githubRequest(
           context,
           account,
-          registration.repository,
-          matches[0].id,
-          callbackUrl,
+          `${repositoryPath(repo)}/hooks`,
+          "POST",
+          signal,
+          {
+            name: "web",
+            active: true,
+            events: ["pull_request"],
+            config: { url: callbackUrl, secret, content_type: "json", insecure_ssl: "0" },
+          },
+        );
+        requireStatus(created, 201);
+        const saved = parseHook(await responseJson(created));
+        if (!isConfiguredHook(saved, callbackUrl)) throw new Error("creation_unresolved");
+        const savedResponse = await githubRequest(
+          context,
+          account,
+          `${repositoryPath(repo)}/hooks/${saved.id}`,
+          "GET",
           signal,
         );
-        if (owner === undefined) saveOwner(context.sql, resource, hookId, identity, false);
+        requireStatus(savedResponse, 200);
+        const hookId = await verifySavedHook(savedResponse, saved.id, callbackUrl);
+        if (!replaceRecreatedOwner(context.sql, resource, previousHookId, hookId, identity))
+          throw new Error("The replacement hook owner could not be recorded.");
+        if (!completeHookMigration(context.sql, patching, registration.migrationRecordId))
+          throw new Error("The approved webhook replacement could not be recorded.");
         saveConfiguredRepositories(context.sql, subscriptionId, config);
+        recordDetail(context.sql, registration.migrationRecordId, "complete", "hook");
         unlockHook(context.sql, resource, lockToken);
         return { hookId };
       } catch {
-        if (locked) {
+        recordDetail(
+          context.sql,
+          registration.migrationRecordId,
+          mutationStarted ? "mutation_unresolved" : "preflight_failed",
+          "hook",
+        );
+        if (!mutationStarted && locked) {
           try {
             unlockHook(context.sql, resource, lockToken);
           } catch {
@@ -1170,7 +1300,7 @@ const githubWebhook = {
     }
 
     let state = claim.state;
-    let patchStarted = false;
+    let mutationStarted = false;
     let path = `${repositoryPath({ fullName: registration.repository })}/hooks/${registration.hookId}`;
     let locked = false;
     try {
@@ -1230,12 +1360,16 @@ const githubWebhook = {
           throw new Error("The approved GitHub webhook identity or settings differ.");
         }
       }
-      const patching = startHookMigrationPatch(context.sql, state, registration.migrationRecordId);
+      const patching = startHookMigrationMutation(
+        context.sql,
+        state,
+        registration.migrationRecordId,
+      );
       if (patching === null) {
         throw new Error("The approved webhook replacement lease was lost.");
       }
       state = patching;
-      patchStarted = true;
+      mutationStarted = true;
 
       let expectedId = registration.hookId;
       if (creating) {
@@ -1285,10 +1419,10 @@ const githubWebhook = {
       recordDetail(
         context.sql,
         registration.migrationRecordId,
-        patchStarted ? "mutation_unresolved" : "preflight_failed",
+        mutationStarted ? "mutation_unresolved" : "preflight_failed",
         "hook",
       );
-      if (!patchStarted) {
+      if (!mutationStarted) {
         try {
           releaseHookMigrationPreflight(context.sql, state, registration.migrationRecordId);
         } catch {
