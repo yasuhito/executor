@@ -195,3 +195,90 @@ test("guarded registration migration preserves legacy registrations and adds ind
   assert.equal(database.prepare("SELECT count(*) AS count FROM github_hook_owners").get().count, 0);
   database.close();
 });
+
+test("expiring hook lock migration releases a legacy lock only when no GitHub mutation can be unresolved", async () => {
+  const migrationState = (phase) =>
+    JSON.stringify({
+      version: 1,
+      phase,
+      subscriptionId: "whk_replacement",
+      originalCallbackHash: "original",
+      replacementCallbackHash: "replacement",
+      secretFingerprint: "secret",
+      token: "token",
+    });
+  const resource = "github-repository:42";
+  const scenarios = [
+    [
+      "interrupted preflight",
+      (db) => {
+        db.prepare(
+          "INSERT INTO github_hook_registrations (subscription_id, hook_id, lease_token, lease_until) VALUES ('record', 42, ?, 0)",
+        ).run(migrationState("preflight"));
+      },
+    ],
+    [
+      "completed registration",
+      (db) => {
+        db.prepare(
+          "INSERT INTO github_hook_registrations (subscription_id, hook_id, lease_token, lease_until) VALUES ('record', 42, ?, 9007199254740991)",
+        ).run(migrationState("complete"));
+      },
+    ],
+    [
+      "unresolved registration mutation",
+      (db) => {
+        db.prepare(
+          "INSERT INTO github_hook_registrations (subscription_id, hook_id, lease_token, lease_until) VALUES ('record', 42, ?, 9007199254740991)",
+        ).run(migrationState("patching"));
+      },
+    ],
+    [
+      "unreadable registration state",
+      (db) => {
+        db.exec(
+          "INSERT INTO github_hook_registrations (subscription_id, hook_id, lease_token, lease_until) VALUES ('record', 42, 'not json', 9007199254740991)",
+        );
+      },
+    ],
+    [
+      "deletable created hook",
+      (db) => {
+        db.prepare(
+          "INSERT INTO github_hook_owners (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here) VALUES (?, 42, 'whk_owner', 'callback', 'secret', 1)",
+        ).run(resource);
+      },
+    ],
+  ];
+  const outcomes = {};
+  for (const [name, seed] of scenarios) {
+    const database = new DatabaseSync(":memory:");
+    for (const file of [
+      "0001_webhook_receipts.sql",
+      "0002_dependabot_review_queue.sql",
+      "0003_url_only_review_telegram_pending.sql",
+      "0004_multi_repository_config.sql",
+      "0005_dry_run_mode.sql",
+      "0006_guarded_hook_ownership.sql",
+    ])
+      database.exec(await migration(file));
+    seed(database);
+    database
+      .prepare("INSERT INTO github_hook_locks (resource, token) VALUES (?, 'legacy')")
+      .run(resource);
+    database.exec(await migration("0007_expiring_hook_locks.sql"));
+    const { lease_until: leaseUntil } = database
+      .prepare("SELECT lease_until FROM github_hook_locks WHERE resource = ?")
+      .get(resource);
+    outcomes[name] = leaseUntil === 0 ? "released" : "held";
+    database.close();
+  }
+
+  assert.deepEqual(outcomes, {
+    "interrupted preflight": "released",
+    "completed registration": "released",
+    "unresolved registration mutation": "held",
+    "unreadable registration state": "held",
+    "deletable created hook": "held",
+  });
+});
