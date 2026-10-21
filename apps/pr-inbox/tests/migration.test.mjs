@@ -111,3 +111,48 @@ test("multi-repository migration preserves queued work and removes repository-sp
     "another-owner/another-repository",
   );
 });
+
+test("dry-run migration defaults existing configurations to safe and stores explicit mode", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of [
+    "0001_webhook_receipts.sql",
+    "0002_dependabot_review_queue.sql",
+    "0003_url_only_review_telegram_pending.sql",
+    "0004_multi_repository_config.sql",
+  ]) {
+    database.exec(await migration(name));
+  }
+  database
+    .prepare(`INSERT INTO configured_repositories
+      (subscription_id, full_name, repository_id, review_worker_url)
+      VALUES ('existing', 'example-owner/example-repository', 123456789, 'https://review.example')`)
+    .run();
+
+  database.exec(await migration("0005_dry_run_mode.sql"));
+  database
+    .prepare(`INSERT INTO configured_repositories
+      (subscription_id, full_name, repository_id, review_worker_url, dry_run)
+      VALUES ('merge-disabled-later', 'another-owner/another-repository', 987654321, 'https://review.example', 0)`)
+    .run();
+
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT subscription_id, dry_run FROM configured_repositories ORDER BY subscription_id",
+      )
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      { subscription_id: "existing", dry_run: 1 },
+      { subscription_id: "merge-disabled-later", dry_run: 0 },
+    ],
+  );
+  assert.throws(() =>
+    database
+      .prepare(`INSERT INTO configured_repositories
+        (subscription_id, full_name, repository_id, review_worker_url, dry_run)
+        VALUES ('invalid', 'third-owner/third-repository', 333333333, 'https://review.example', 2)`)
+      .run(),
+  );
+});

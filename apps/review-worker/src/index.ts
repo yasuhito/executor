@@ -105,6 +105,20 @@ function configuredRepositories(env: Env): RepositoryConfig[] | null {
   }
 }
 
+function healthResponse(env: Env): Response {
+  const ready =
+    configuredRepositories(env) !== null &&
+    typeof env.REVIEW_HMAC_SECRET === "string" &&
+    env.REVIEW_HMAC_SECRET.length > 0 &&
+    typeof env.CREDENTIAL_BOOTSTRAP_SECRET === "string" &&
+    env.CREDENTIAL_BOOTSTRAP_SECRET.length > 0 &&
+    typeof env.CREDENTIAL_ENCRYPTION_KEY === "string" &&
+    env.CREDENTIAL_ENCRYPTION_KEY.length > 0 &&
+    typeof env.OPENAI_MODEL === "string" &&
+    env.OPENAI_MODEL.length > 0;
+  return json(ready ? 200 : 503, { status: ready ? "ok" : "configuration_unavailable" });
+}
+
 function parseReviewSubmission(
   value: unknown,
   repositories: readonly RepositoryConfig[],
@@ -738,6 +752,10 @@ function targetReviewId(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/health") {
+      if (request.method !== "GET") return json(405, { status: "method_not_allowed" });
+      return healthResponse(env);
+    }
     if (path.startsWith("/v1/credentials/")) {
       if (
         !["/v1/credentials/import", "/v1/credentials/revoke", "/v1/credentials/status"].includes(

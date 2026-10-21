@@ -17,6 +17,7 @@ async function createContext() {
     "0002_dependabot_review_queue.sql",
     "0003_url_only_review_telegram_pending.sql",
     "0004_multi_repository_config.sql",
+    "0005_dry_run_mode.sql",
   ]) {
     const migration = await readFile(
       new URL(`../migrations/${migrationName}`, import.meta.url),
@@ -868,7 +869,7 @@ test("replacement registration patches the approved hook and replaces the source
       hook: visibleHook(fixture.currentHook()),
       configuredRepositories: fixture.context.sql
         .exec(
-          "SELECT subscription_id, full_name, repository_id, review_worker_url FROM configured_repositories",
+          "SELECT subscription_id, full_name, repository_id, review_worker_url, dry_run FROM configured_repositories",
         )
         .toArray()
         .map(({ ...row }) => row),
@@ -906,6 +907,7 @@ test("replacement registration patches the approved hook and replaces the source
           full_name: targetRepository.full_name,
           repository_id: targetRepository.id,
           review_worker_url: reviewWorkerUrl,
+          dry_run: 1,
         },
       ],
       resultLeaksSecret: false,

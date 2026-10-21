@@ -1,5 +1,6 @@
 import {
   array,
+  boolean,
   defineApp,
   number,
   object,
@@ -40,6 +41,7 @@ const registrationConfigSchema = object({
 const replacementConfig = object({
   repositories: array(repositoryConfigSchema),
   reviewWorkerUrl: string(),
+  dryRun: boolean().optional(),
   registration: registrationConfigSchema,
 });
 const maxBodyBytes = 1024 * 1024;
@@ -375,6 +377,7 @@ interface RegistrationConfig {
 interface ReplacementConfig {
   repositories: readonly RepositoryConfig[];
   reviewWorkerUrl: string;
+  dryRun?: boolean;
   registration: RegistrationConfig;
 }
 
@@ -848,12 +851,13 @@ function saveConfiguredRepositories(
     for (const repository of config.repositories) {
       transaction.exec(
         `INSERT INTO configured_repositories
-          (subscription_id, full_name, repository_id, review_worker_url)
-         VALUES (?, ?, CAST(? AS INTEGER), ?)`,
+          (subscription_id, full_name, repository_id, review_worker_url, dry_run)
+         VALUES (?, ?, CAST(? AS INTEGER), ?, ?)`,
         subscriptionId,
         repository.fullName,
         repository.id,
         config.reviewWorkerUrl,
+        config.dryRun === false ? 0 : 1,
       );
     }
   });

@@ -21,6 +21,7 @@ async function createSql() {
     "0002_dependabot_review_queue.sql",
     "0003_url_only_review_telegram_pending.sql",
     "0004_multi_repository_config.sql",
+    "0005_dry_run_mode.sql",
   ]) {
     database.exec(
       await readFile(new URL(`../migrations/${migrationName}`, import.meta.url), "utf8"),
