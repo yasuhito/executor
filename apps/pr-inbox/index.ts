@@ -977,14 +977,35 @@ function hookResource(repositoryId: number): string {
   return `github-repository:${repositoryId}`;
 }
 
+/** A holder that stops before pinning can never have mutated GitHub, so its lock expires. */
 function lockHook(sql: Sql, resource: string, token: string): boolean {
+  const now = Date.now();
   return (
     sql.exec(
-      "INSERT OR IGNORE INTO github_hook_locks (resource, token) VALUES (?, ?)",
+      `INSERT INTO github_hook_locks (resource, token, lease_until)
+       VALUES (?, ?, CAST(? AS INTEGER))
+       ON CONFLICT(resource) DO UPDATE
+       SET token = excluded.token, lease_until = excluded.lease_until
+       WHERE github_hook_locks.lease_until <= CAST(? AS INTEGER)`,
       resource,
       token,
+      now + registrationLeaseMs,
+      now,
     ).rowsWritten === 1
   );
+}
+
+/** Pin before any GitHub mutation: an interrupted mutation needs operator recovery. */
+function pinHookLock(sql: Sql, resource: string, token: string): void {
+  const pinned =
+    sql.exec(
+      `UPDATE github_hook_locks SET lease_until = CAST(? AS INTEGER)
+       WHERE resource = ? AND token = ?`,
+      completedLeaseUntil,
+      resource,
+      token,
+    ).rowsWritten === 1;
+  if (!pinned) throw new Error("hook_lock_lost");
 }
 
 function unlockHook(sql: Sql, resource: string, token: string): void {
@@ -1241,6 +1262,7 @@ const githubWebhook = {
           .toArray()[0];
         if (otherOwner !== undefined) throw new Error("hook_has_other_owner");
 
+        pinHookLock(context.sql, resource, lockToken);
         const patching = startHookMigrationMutation(
           context.sql,
           claim.state,
@@ -1360,6 +1382,7 @@ const githubWebhook = {
           throw new Error("The approved GitHub webhook identity or settings differ.");
         }
       }
+      pinHookLock(context.sql, resource, lockToken);
       const patching = startHookMigrationMutation(
         context.sql,
         state,
@@ -1486,6 +1509,7 @@ const githubWebhook = {
         !preservedHookIds.has(state.hookId)
       ) {
         // Only hooks created by this implementation can ever be deleted.
+        pinHookLock(context.sql, resource, token);
         deleting = true;
         const result = await githubRequest(
           context,

@@ -19,8 +19,9 @@ callbacks must be canonical HTTPS URLs on the same origin, with distinct paths.
 The account and repository numeric identity must match the approved configuration.
 
 Run locally: `npm test` and `npm run typecheck` in this app directory.
-New migration `0006_guarded_hook_ownership.sql` is additive; do not edit applied
-migrations. It does not backfill legacy ownership or grant deletion rights.
+Migrations `0006_guarded_hook_ownership.sql` and `0007_expiring_hook_locks.sql`
+are additive; do not edit applied migrations. They do not backfill legacy
+ownership or grant deletion rights.
 
 ## Read-only diagnostics
 
@@ -65,8 +66,12 @@ unresolved and blocks retry. Changed identity is rejected. Lost mutation respons
 require operator investigation, not a new record ID or clearing a lock.
 
 References are durable and locks cover the entire repository across linked
-accounts. An interrupted lock intentionally has no expiry: do not manually clear
-it without proving the external outcome. Cleanup releases only its own reference;
+accounts. A lock expires after 60 seconds until its holder pins it immediately
+before a GitHub PATCH, POST, or DELETE, so an attempt interrupted before any
+mutation cannot strand the repository. A pinned lock never expires: do not
+manually clear it without proving the external outcome. `0007` releases a legacy
+lock only when no registration can be mid-mutation and the repository has no
+created hook cleanup could delete. Cleanup releases only its own reference;
 shared hooks are not deleted. Adopted and unknown/legacy hooks are never deleted.
 Only a hook created here with a sole live reference can be deleted; repeated
 cleanup uses a retained retirement record and does not repeat DELETE. This cannot

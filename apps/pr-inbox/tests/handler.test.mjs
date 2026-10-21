@@ -25,6 +25,7 @@ async function createContext() {
     "0004_multi_repository_config.sql",
     "0005_dry_run_mode.sql",
     "0006_guarded_hook_ownership.sql",
+    "0007_expiring_hook_locks.sql",
   ]) {
     const migration = await readFile(
       new URL(`../migrations/${migrationName}`, import.meta.url),
@@ -1042,6 +1043,52 @@ test("concurrent attempts for one replacement serialize to one GitHub PATCH", as
   );
 });
 
+async function withClockAdvanced(milliseconds, work) {
+  const realNow = Date.now;
+  Date.now = () => realNow() + milliseconds;
+  try {
+    return await work();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test("an attempt interrupted before any GitHub mutation does not strand the hook lock", async () => {
+  const fixture = await registrationFixture({ holdPreflight: true });
+  const interrupted = registrationOutcome(fixture.context, registrationInput());
+  await fixture.preflightStarted;
+  const duringLease = await registrationOutcome(fixture.context, registrationInput());
+  const afterLease = await withClockAdvanced(61_000, () =>
+    registrationOutcome(fixture.context, registrationInput()),
+  );
+  fixture.releasePreflight();
+  const resumed = await interrupted;
+
+  assert.deepEqual(
+    {
+      duringLease,
+      afterLease,
+      resumed,
+      patchCount: fixture.calls.filter(({ method }) => method === "PATCH").length,
+      migration: readHookMigrationDiagnostic(fixture.context.sql, diagnosticReservationId),
+    },
+    {
+      duringLease: {
+        error: "The approved webhook replacement is already claimed or unresolved.",
+      },
+      afterLease: { result: { hookId: approvedHookId } },
+      resumed: { error: "GitHub webhook replacement failed; stop for operator recovery." },
+      patchCount: 1,
+      migration: {
+        reservation: "present",
+        phase: "complete",
+        subscriptionId: replacementSubscriptionId,
+        failureClass: "recorded_complete",
+      },
+    },
+  );
+});
+
 test("the original subscription cannot register through the replacement source", async () => {
   const fixture = await registrationFixture();
   const outcome = await registrationOutcome(
@@ -1800,6 +1847,35 @@ test("another account cannot race an unresolved hook mutation or delete its refe
     }),
     /cleanup_blocked/,
   );
+  assert.equal(fixture.calls.filter(({ method }) => method === "PATCH").length, 1);
+  assert.equal(
+    fixture.calls.some(({ method }) => method === "DELETE"),
+    false,
+  );
+});
+
+test("a hook lock held across an unresolved mutation never expires", async () => {
+  const fixture = await selfHealingFixture({ duplicateReadback: true });
+  await registrationOutcome(fixture.context, registrationInput());
+  const other = registrationInput({
+    subscriptionId: "whk_test-other",
+    account: { ...registrationInput().account, id: "another-account" },
+    config: withRegistration({
+      sourceAccountId: "another-account",
+      migrationRecordId: "other-record",
+    }),
+  });
+
+  await withClockAdvanced(365 * 24 * 60 * 60 * 1000, async () => {
+    assert.ok((await registrationOutcome(fixture.context, other)).error);
+    await assert.rejects(
+      githubWebhook.unregister(fixture.context, {
+        ...registrationInput(),
+        state: { hookId: approvedHookId },
+      }),
+      /cleanup_blocked/,
+    );
+  });
   assert.equal(fixture.calls.filter(({ method }) => method === "PATCH").length, 1);
   assert.equal(
     fixture.calls.some(({ method }) => method === "DELETE"),
