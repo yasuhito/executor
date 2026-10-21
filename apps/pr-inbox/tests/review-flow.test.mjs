@@ -7,7 +7,14 @@ const repository = "example-owner/example-repository";
 const headSha = "0123456789abcdef0123456789abcdef01234567";
 const baseSha = "89abcdef0123456789abcdef0123456789abcdef";
 
-function processDependabotPullRequest(pullRequest, expectedHead, expectedBase, deliveryId, port) {
+function processDependabotPullRequest(
+  pullRequest,
+  expectedHead,
+  expectedBase,
+  deliveryId,
+  port,
+  options = { dryRun: false },
+) {
   return runProcessDependabotPullRequest(
     repository,
     pullRequest,
@@ -15,6 +22,7 @@ function processDependabotPullRequest(pullRequest, expectedHead, expectedBase, d
     expectedBase,
     deliveryId,
     port,
+    options,
   );
 }
 const title = "Bump example from 1.0.0 to 1.0.1";
@@ -138,6 +146,116 @@ test("review service receives only the canonical PR URL and operation ID before 
       ],
       state: "complete",
       kind: "merged",
+    },
+  );
+});
+
+test("dry-run records a fresh reviewable result without calling the merge adapter", async () => {
+  let merges = 0;
+  let renewals = 0;
+  let reads = 0;
+  const result = await processDependabotPullRequest(
+    42,
+    headSha,
+    baseSha,
+    "11111111-2222-4333-8444-555555555555",
+    port({
+      submitReview: async () => passedReview(),
+      readPullRequest: async () => {
+        reads += 1;
+        return pullRequest();
+      },
+      mergeVerified: async () => {
+        merges += 1;
+        return { status: "merged" };
+      },
+      renewLease: async () => {
+        renewals += 1;
+        return true;
+      },
+    }),
+    { dryRun: true },
+  );
+
+  assert.deepEqual(
+    { merges, renewals, reads, state: result.state, kind: result.kind, decision: result.decision },
+    {
+      merges: 0,
+      renewals: 1,
+      reads: 2,
+      state: "complete",
+      kind: "dry-run",
+      decision: "reviewable",
+    },
+  );
+});
+
+test("dry-run is the fail-safe default when no merge setting is provided", async () => {
+  let merges = 0;
+  const result = await runProcessDependabotPullRequest(
+    repository,
+    42,
+    headSha,
+    baseSha,
+    "11111111-2222-4333-8444-555555555555",
+    port({
+      submitReview: async () => passedReview(),
+      readPullRequest: async () => pullRequest(),
+      mergeVerified: async () => {
+        merges += 1;
+        return { status: "merged" };
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    { merges, state: result.state, kind: result.kind, decision: result.decision },
+    { merges: 0, state: "complete", kind: "dry-run", decision: "reviewable" },
+  );
+});
+
+test("dry-run invalidates a review when the pull request changes before recording it", async () => {
+  let merges = 0;
+  let reads = 0;
+  const invalidated = [];
+  const completed = await passedReview();
+  const otherBase = "fedcba9876543210fedcba9876543210fedcba98";
+  const result = await processDependabotPullRequest(
+    42,
+    headSha,
+    baseSha,
+    "11111111-2222-4333-8444-555555555555",
+    port({
+      submitReview: async () => completed,
+      readPullRequest: async () => {
+        reads += 1;
+        return pullRequest(reads === 1 ? baseSha : otherBase);
+      },
+      invalidate: async (id) => invalidated.push(id),
+      mergeVerified: async () => {
+        merges += 1;
+        return { status: "merged" };
+      },
+    }),
+    { dryRun: true },
+  );
+
+  assert.deepEqual(
+    {
+      merges,
+      reads,
+      invalidated,
+      state: result.state,
+      kind: result.kind,
+      failureCode: result.failureCode,
+    },
+    {
+      merges: 0,
+      reads: 2,
+      invalidated: [completed.reviewId],
+      state: "stale",
+      kind: "stale",
+      failureCode: "base_changed",
     },
   );
 });

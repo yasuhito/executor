@@ -46,11 +46,13 @@ const emptyInput = object({});
 interface ConfiguredRepository {
   repository: RepositoryConfig;
   reviewWorkerUrl: string;
+  dryRun: boolean;
 }
 
 interface ConfiguredRepositoryRow extends Record<string, string | number | null | ArrayBuffer> {
   repository_id: number;
   review_worker_url: string;
+  dry_run: number;
 }
 
 function resolveConfiguredRepository(
@@ -59,7 +61,7 @@ function resolveConfiguredRepository(
 ): ConfiguredRepository | null {
   const rows = sql
     .exec<ConfiguredRepositoryRow>(
-      `SELECT DISTINCT repository_id, review_worker_url
+      `SELECT DISTINCT repository_id, review_worker_url, dry_run
      FROM configured_repositories WHERE full_name = ?`,
       fullName,
     )
@@ -68,6 +70,7 @@ function resolveConfiguredRepository(
   return {
     repository: { fullName, id: rows[0].repository_id },
     reviewWorkerUrl: rows[0].review_worker_url,
+    dryRun: rows[0].dry_run !== 0,
   };
 }
 
@@ -237,6 +240,7 @@ interface RecoveryRepositoryRow extends Record<string, string | number | null | 
   full_name: string;
   repository_id: number;
   review_worker_url: string;
+  dry_run: number;
 }
 
 const recoverQueueMutation = mutation(
@@ -245,7 +249,7 @@ const recoverQueueMutation = mutation(
     const now = Date.now();
     const rows = context.sql
       .exec<RecoveryRepositoryRow>(
-        "SELECT full_name, repository_id, review_worker_url FROM configured_repositories ORDER BY full_name",
+        "SELECT full_name, repository_id, review_worker_url, dry_run FROM configured_repositories ORDER BY full_name",
       )
       .toArray();
     const configurations = new Map<string, Map<string, ConfiguredRepository>>();
@@ -253,8 +257,9 @@ const recoverQueueMutation = mutation(
       const value = {
         repository: { fullName: row.full_name, id: row.repository_id },
         reviewWorkerUrl: row.review_worker_url,
+        dryRun: row.dry_run !== 0,
       };
-      const key = JSON.stringify([value.repository.id, value.reviewWorkerUrl]);
+      const key = JSON.stringify([value.repository.id, value.reviewWorkerUrl, value.dryRun]);
       const choices = configurations.get(row.full_name) ?? new Map<string, ConfiguredRepository>();
       choices.set(key, value);
       configurations.set(row.full_name, choices);
@@ -289,7 +294,7 @@ const processQueueWorkflow = workflow(
     input: repositoryInput,
     output: object({ processed: number() }),
     description:
-      "Serialize Dependabot pull-request reviews, guarded merges, and Telegram notification records.",
+      "Serialize Dependabot pull-request reviews, configured guarded merges, and Telegram notification records.",
   },
   async (context: WorkflowContext<typeof requirements>, input) => {
     const configuration = await context.step.runQuery(
@@ -298,7 +303,7 @@ const processQueueWorkflow = workflow(
       { repository: input.repository },
     );
     if (configuration === null) throw new Error("Unsupported review repository.");
-    const { repository, reviewWorkerUrl } = configuration;
+    const { repository, reviewWorkerUrl, dryRun } = configuration;
     let processed = 0;
     let lockWaits = 0;
     let claimAttempts = 0;
@@ -334,6 +339,7 @@ const processQueueWorkflow = workflow(
         index,
         repository,
         reviewWorkerUrl,
+        dryRun,
       );
       processed += 1;
     }
@@ -456,6 +462,7 @@ async function processClaimedItem(
   index: number,
   repository: RepositoryConfig,
   reviewWorkerUrl: string,
+  dryRun: boolean,
 ): Promise<void> {
   if (item.repository !== repository.fullName) {
     throw new Error("Claimed review item belongs to a different repository.");
@@ -468,6 +475,7 @@ async function processClaimedItem(
     item.event_base_sha,
     item.delivery_id,
     port,
+    { dryRun },
   );
   const notifications = await notificationsForResult(item, result);
   const complete = await context.step.runMutation(
@@ -504,7 +512,7 @@ export async function notificationsForResult(
 ): Promise<NotificationInput[]> {
   const notices: NotificationInput[] = [];
   for (const notice of result.notices) {
-    if (notice.kind === "merged") continue;
+    if (notice.kind !== "needs-attention" && notice.kind !== "stale") continue;
     const identity = notice.identity ?? {
       repository: item.repository,
       pullRequest: item.pull_request_number,

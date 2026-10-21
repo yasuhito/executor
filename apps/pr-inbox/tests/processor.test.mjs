@@ -20,13 +20,20 @@ const queueItem = {
   attempts: 1,
 };
 
-test("successful merges do not create Telegram notification records", async () => {
-  const result = {
+test("successful merges and dry-run reviews do not create Telegram notification records", async () => {
+  const merged = {
     kind: "merged",
     notices: [{ kind: "merged", identity, snapshotHash, detail: "Merged successfully." }],
   };
+  const dryRun = {
+    kind: "dry-run",
+    notices: [
+      { kind: "dry-run", identity, snapshotHash, detail: "Review completed in dry-run mode." },
+    ],
+  };
 
-  assert.deepEqual(await notificationsForResult(queueItem, result), []);
+  assert.deepEqual(await notificationsForResult(queueItem, merged), []);
+  assert.deepEqual(await notificationsForResult(queueItem, dryRun), []);
 });
 
 test("actionable failures produce a queued Telegram notification record", async () => {
