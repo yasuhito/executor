@@ -11,6 +11,12 @@ const ignoredDirectories = new Set([
   "dist",
   "coverage",
 ]);
+// Hash-pinned applied migrations retain the original repository path; exempt only that rule.
+const immutableAppliedMigrationFiles = new Set([
+  join("apps", "pr-inbox", "migrations", "0001_webhook_receipts.sql"),
+  join("apps", "pr-inbox", "migrations", "0002_dependabot_review_queue.sql"),
+  join("apps", "pr-inbox", "migrations", "0003_url_only_review_telegram_pending.sql"),
+]);
 const ignoredLocalConfig = (name) =>
   /\.local\.(?:json|toml)$/i.test(name) ||
   name === ".dev.vars" ||
@@ -51,6 +57,9 @@ async function collectFiles(directory) {
 
 const violations = [];
 for (const path of await collectFiles(root)) {
+  const relativePath = relative(root, path);
+  const isImmutableAppliedMigration = immutableAppliedMigrationFiles.has(relativePath);
+
   let content;
   try {
     content = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path));
@@ -61,7 +70,8 @@ for (const path of await collectFiles(root)) {
   const lines = content.split(/\r?\n/);
   for (const [index, line] of lines.entries()) {
     for (const [label, pattern] of rules) {
-      if (pattern.test(line)) violations.push(`${relative(root, path)}:${index + 1}: ${label}`);
+      if (isImmutableAppliedMigration && label === "repository-specific qni path") continue;
+      if (pattern.test(line)) violations.push(`${relativePath}:${index + 1}: ${label}`);
     }
   }
 }
