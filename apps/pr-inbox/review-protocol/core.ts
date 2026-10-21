@@ -59,7 +59,11 @@ export interface StoredReview {
 }
 
 export interface ReviewStore {
-  reserve(identity: ReviewIdentity, snapshotHash: string, snapshot: ReviewSnapshot): Promise<"created" | "existing" | "conflict" | "stale">;
+  reserve(
+    identity: ReviewIdentity,
+    snapshotHash: string,
+    snapshot: ReviewSnapshot,
+  ): Promise<"created" | "existing" | "conflict" | "stale">;
   get(identity: ReviewIdentity): Promise<StoredReview | undefined>;
   getSnapshot(identity: ReviewIdentity, snapshotHash: string): Promise<ReviewSnapshot | undefined>;
   complete(identity: ReviewIdentity, snapshotHash: string, verdict: ReviewVerdict): Promise<void>;
@@ -69,7 +73,10 @@ export interface ReviewStore {
 
 export interface DurableReviewHarness {
   submit(prompt: string, options: { operationId: string }): Promise<{ operationId: string }>;
-  wait(operationId: string, signal: AbortSignal): Promise<{ status: string; text?: string; reason?: string }>;
+  wait(
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<{ status: string; text?: string; reason?: string }>;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,7 +84,9 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isValidPath(path: unknown): path is string {
-  return typeof path === "string" && path.length > 0 && path.length <= 512 && pathPattern.test(path);
+  return (
+    typeof path === "string" && path.length > 0 && path.length <= 512 && pathPattern.test(path)
+  );
 }
 
 function utf8Size(value: string): number {
@@ -96,7 +105,8 @@ export function parseReviewIdentity(value: unknown): ReviewIdentity | null {
     !shaPattern.test(value.headSha) ||
     typeof value.testedBaseSha !== "string" ||
     !shaPattern.test(value.testedBaseSha)
-  ) return null;
+  )
+    return null;
   return {
     repository: value.repository,
     pullRequest: value.pullRequest,
@@ -114,18 +124,23 @@ export function parseReviewSnapshot(value: unknown): ReviewSnapshot | null {
     value.title.length > 1024 ||
     !Array.isArray(value.commitMessages) ||
     value.commitMessages.length > 50 ||
-    !value.commitMessages.every((message) => typeof message === "string" && message.length <= 2048) ||
+    !value.commitMessages.every(
+      (message) => typeof message === "string" && message.length <= 2048,
+    ) ||
     !Array.isArray(value.files) ||
     value.files.length === 0 ||
     value.files.length > maxFiles ||
     !Array.isArray(value.contextFiles) ||
     value.contextFiles.length > 30
-  ) return null;
+  )
+    return null;
 
   const files: ReviewFile[] = [];
   for (const rawFile of value.files) {
-    if (!isRecord(rawFile) || !isValidPath(rawFile.path) || typeof rawFile.patch !== "string") return null;
-    if (!["added", "modified", "removed", "renamed", "copied"].includes(String(rawFile.status))) return null;
+    if (!isRecord(rawFile) || !isValidPath(rawFile.path) || typeof rawFile.patch !== "string")
+      return null;
+    if (!["added", "modified", "removed", "renamed", "copied"].includes(String(rawFile.status)))
+      return null;
     if (rawFile.patch.length === 0 || rawFile.patch.length > maxDiffBytes) return null;
     const previousPath = rawFile.previousPath;
     if (previousPath !== undefined && !isValidPath(previousPath)) return null;
@@ -139,7 +154,8 @@ export function parseReviewSnapshot(value: unknown): ReviewSnapshot | null {
 
   const contextFiles: ContextFile[] = [];
   for (const rawFile of value.contextFiles) {
-    if (!isRecord(rawFile) || !isValidPath(rawFile.path) || typeof rawFile.content !== "string") return null;
+    if (!isRecord(rawFile) || !isValidPath(rawFile.path) || typeof rawFile.content !== "string")
+      return null;
     contextFiles.push({ path: rawFile.path, content: rawFile.content });
   }
 
@@ -157,7 +173,12 @@ export function parseReviewSnapshot(value: unknown): ReviewSnapshot | null {
   };
   const diffBytes = files.reduce((sum, file) => sum + utf8Size(file.patch), 0);
   const contextBytes = contextFiles.reduce((sum, file) => sum + utf8Size(file.content), 0);
-  if (diffBytes > maxDiffBytes || contextBytes > maxContextBytes || utf8Size(canonicalSnapshot(snapshot)) > maxSnapshotBytes) return null;
+  if (
+    diffBytes > maxDiffBytes ||
+    contextBytes > maxContextBytes ||
+    utf8Size(canonicalSnapshot(snapshot)) > maxSnapshotBytes
+  )
+    return null;
   return snapshot;
 }
 
@@ -168,9 +189,15 @@ function comparePaths(left: string, right: string): number {
 export function canonicalSnapshot(snapshot: ReviewSnapshot): string {
   const files = [...snapshot.files]
     .sort((left, right) => comparePaths(left.path, right.path))
-    .map(({ path, previousPath, status, patch }) => ({ path, previousPath: previousPath ?? null, status, patch }));
-  const contextFiles = [...snapshot.contextFiles]
-    .sort((left, right) => comparePaths(left.path, right.path));
+    .map(({ path, previousPath, status, patch }) => ({
+      path,
+      previousPath: previousPath ?? null,
+      status,
+      patch,
+    }));
+  const contextFiles = [...snapshot.contextFiles].sort((left, right) =>
+    comparePaths(left.path, right.path),
+  );
   return JSON.stringify({
     identity: snapshot.identity,
     title: snapshot.title,
@@ -186,7 +213,9 @@ export async function sha256Hex(value: string): Promise<string> {
 }
 
 export async function reviewJobId(identity: ReviewIdentity): Promise<string> {
-  return sha256Hex(`${identity.repository}#${identity.pullRequest}:${identity.headSha.toLowerCase()}:${identity.testedBaseSha.toLowerCase()}`);
+  return sha256Hex(
+    `${identity.repository}#${identity.pullRequest}:${identity.headSha.toLowerCase()}:${identity.testedBaseSha.toLowerCase()}`,
+  );
 }
 
 export function buildReviewPrompt(snapshot: ReviewSnapshot): string {
@@ -210,11 +239,29 @@ export function buildReviewPrompt(snapshot: ReviewSnapshot): string {
 }
 
 function parseAxis(value: unknown): ReviewAxis | null {
-  if (!isRecord(value) || !["pass", "findings", "unverifiable"].includes(String(value.status)) || !Array.isArray(value.findings) || value.findings.length > 8) return null;
+  if (
+    !isRecord(value) ||
+    !["pass", "findings", "unverifiable"].includes(String(value.status)) ||
+    !Array.isArray(value.findings) ||
+    value.findings.length > 8
+  )
+    return null;
   const findings: Finding[] = [];
   for (const item of value.findings) {
-    if (!isRecord(item) || typeof item.path !== "string" || typeof item.summary !== "string" || typeof item.evidence !== "string") return null;
-    if (item.path.length > 512 || item.summary.length === 0 || item.summary.length > 800 || item.evidence.length > 1200) return null;
+    if (
+      !isRecord(item) ||
+      typeof item.path !== "string" ||
+      typeof item.summary !== "string" ||
+      typeof item.evidence !== "string"
+    )
+      return null;
+    if (
+      item.path.length > 512 ||
+      item.summary.length === 0 ||
+      item.summary.length > 800 ||
+      item.evidence.length > 1200
+    )
+      return null;
     findings.push({ path: item.path, summary: item.summary, evidence: item.evidence });
   }
   if (value.status === "pass" && findings.length !== 0) return null;
@@ -234,15 +281,18 @@ export function parseReviewVerdict(text: string): ReviewVerdict | null {
   const standards = parseAxis(value.standards);
   const changeIntent = parseAxis(value.changeIntent);
   if (standards === null || changeIntent === null) return null;
-  const decision = standards.status === "pass" && changeIntent.status === "pass"
-    ? "reviewable"
-    : "needs-attention";
+  const decision =
+    standards.status === "pass" && changeIntent.status === "pass"
+      ? "reviewable"
+      : "needs-attention";
   return { decision, standards, changeIntent };
 }
 
 function authFailureCode(value: unknown): "reauth_required" | null {
-  if (typeof value === "string" && value.includes("EXECUTOR_REAUTH_REQUIRED")) return "reauth_required";
-  if (value instanceof Error && value.message.includes("EXECUTOR_REAUTH_REQUIRED")) return "reauth_required";
+  if (typeof value === "string" && value.includes("EXECUTOR_REAUTH_REQUIRED"))
+    return "reauth_required";
+  if (value instanceof Error && value.message.includes("EXECUTOR_REAUTH_REQUIRED"))
+    return "reauth_required";
   return null;
 }
 
@@ -266,7 +316,14 @@ export async function runDurableReview(
   const submission = await harness.submit(buildReviewPrompt(snapshot), { operationId });
   if (submission.operationId !== operationId) {
     await store.fail(identity, snapshotHash, "operation_identity_mismatch");
-    return (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode: "operation_identity_mismatch" };
+    return (
+      (await store.get(identity)) ?? {
+        identity,
+        snapshotHash,
+        state: "complete",
+        failureCode: "operation_identity_mismatch",
+      }
+    );
   }
 
   let result: { status: string; text?: string; reason?: string };
@@ -276,7 +333,9 @@ export async function runDurableReview(
     const failureCode = authFailureCode(error);
     if (failureCode !== null) {
       await store.fail(identity, snapshotHash, failureCode);
-      return (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode };
+      return (
+        (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode }
+      );
     }
     return (await store.get(identity)) ?? { identity, snapshotHash, state: "pending" };
   }
@@ -284,12 +343,21 @@ export async function runDurableReview(
   if (result.status !== "done" || typeof result.text !== "string") {
     const failureCode = authFailureCode(result.reason) ?? "model_unavailable";
     await store.fail(identity, snapshotHash, failureCode);
-    return (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode };
+    return (
+      (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode }
+    );
   }
   const verdict = parseReviewVerdict(result.text);
   if (verdict === null) {
     await store.fail(identity, snapshotHash, "invalid_model_output");
-    return (await store.get(identity)) ?? { identity, snapshotHash, state: "complete", failureCode: "invalid_model_output" };
+    return (
+      (await store.get(identity)) ?? {
+        identity,
+        snapshotHash,
+        state: "complete",
+        failureCode: "invalid_model_output",
+      }
+    );
   }
   await store.complete(identity, snapshotHash, verdict);
   stored = await store.get(identity);
@@ -304,7 +372,8 @@ export async function resumeDurableReview(
   options: { waitMs: number },
 ): Promise<StoredReview | undefined> {
   const stored = await store.get(identity);
-  if (stored === undefined || stored.snapshotHash !== snapshotHash || stored.state !== "pending") return stored;
+  if (stored === undefined || stored.snapshotHash !== snapshotHash || stored.state !== "pending")
+    return stored;
   const snapshot = await store.getSnapshot(identity, snapshotHash);
   if (snapshot === undefined) throw new Error("Pending review has no stored immutable snapshot.");
   const parsed = parseReviewSnapshot(snapshot);
@@ -314,8 +383,9 @@ export async function resumeDurableReview(
     parsed.identity.pullRequest !== identity.pullRequest ||
     parsed.identity.headSha !== identity.headSha ||
     parsed.identity.testedBaseSha !== identity.testedBaseSha ||
-    await sha256Hex(canonicalSnapshot(parsed)) !== snapshotHash
-  ) throw new Error("Pending review snapshot does not match its durable identity and hash.");
+    (await sha256Hex(canonicalSnapshot(parsed))) !== snapshotHash
+  )
+    throw new Error("Pending review snapshot does not match its durable identity and hash.");
   return runDurableReview(parsed, snapshotHash, store, harness, options);
 }
 

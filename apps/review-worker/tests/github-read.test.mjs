@@ -50,17 +50,23 @@ function context(fetch) {
 }
 
 test("an unreadable newest completed run cannot fall back to an older successful CI run", async () => {
-  const proof = await readRequiredCi(context(async (input) => {
-    const url = new URL(String(input));
-    if (url.origin !== "https://api.github.com") throw new Error("Unexpected origin");
-    if (url.pathname.endsWith("/actions/runs")) return Response.json({ total_count: runs.length, workflow_runs: runs });
-    if (url.pathname.endsWith(`/commits/${latestMergeSha}`)) return new Response("untrusted body", { status: 503 });
-    if (url.pathname.endsWith(`/commits/${olderMergeSha}`)) {
-      return Response.json({ sha: olderMergeSha, parents: [{ sha: baseSha }, { sha: headSha }] });
-    }
-    if (url.pathname.endsWith(`/commits/${olderMergeSha}/check-runs`)) return Response.json({ total_count: checkRuns.length, check_runs: checkRuns });
-    throw new Error("Unexpected test endpoint");
-  }), pullRequest);
+  const proof = await readRequiredCi(
+    context(async (input) => {
+      const url = new URL(String(input));
+      if (url.origin !== "https://api.github.com") throw new Error("Unexpected origin");
+      if (url.pathname.endsWith("/actions/runs"))
+        return Response.json({ total_count: runs.length, workflow_runs: runs });
+      if (url.pathname.endsWith(`/commits/${latestMergeSha}`))
+        return new Response("untrusted body", { status: 503 });
+      if (url.pathname.endsWith(`/commits/${olderMergeSha}`)) {
+        return Response.json({ sha: olderMergeSha, parents: [{ sha: baseSha }, { sha: headSha }] });
+      }
+      if (url.pathname.endsWith(`/commits/${olderMergeSha}/check-runs`))
+        return Response.json({ total_count: checkRuns.length, check_runs: checkRuns });
+      throw new Error("Unexpected test endpoint");
+    }),
+    pullRequest,
+  );
 
   assert.deepEqual(proof, {
     kind: "unproven",
@@ -94,10 +100,29 @@ test("only canonical GitHub pull-request URLs are parsed", () => {
 });
 
 test("public GitHub API rate limits are classified without exposing response bodies", async () => {
-  const error = await readRequiredCi(context(async () => new Response("fixture token must not surface", {
-    status: 403,
-    headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 60) },
-  })), pullRequest).then(() => null, (value) => value);
+  const error = await readRequiredCi(
+    context(
+      async () =>
+        new Response("fixture token must not surface", {
+          status: 403,
+          headers: {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 60),
+          },
+        }),
+    ),
+    pullRequest,
+  ).then(
+    () => null,
+    (value) => value,
+  );
 
-  assert.deepEqual([error instanceof GitHubRateLimitError, error.retryAfterMs > 0, error.message.includes("fixture token")], [true, true, false]);
+  assert.deepEqual(
+    [
+      error instanceof GitHubRateLimitError,
+      error.retryAfterMs > 0,
+      error.message.includes("fixture token"),
+    ],
+    [true, true, false],
+  );
 });

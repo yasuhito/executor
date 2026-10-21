@@ -46,33 +46,64 @@ test("CI pending remains distinct from success", () => {
 });
 
 test("a failed required check is a failure, not a green result", () => {
-  const result = prove({ checkRuns: checkRuns.map((check) => check.name === "tui" ? { ...check, conclusion: "failure" } : check) });
+  const result = prove({
+    checkRuns: checkRuns.map((check) =>
+      check.name === "tui" ? { ...check, conclusion: "failure" } : check,
+    ),
+  });
 
-  assert.deepEqual(result, { kind: "failed", reason: "Required check tui did not succeed.", evidence });
+  assert.deepEqual(result, {
+    kind: "failed",
+    reason: "Required check tui did not succeed.",
+    evidence,
+  });
 });
 
 test("a successful check suite proves tested base from the merge commit parents", () => {
   const result = prove();
 
-  assert.deepEqual(result, { kind: "passed", testedBaseSha: baseSha, testedHeadSha: headSha, mergeSha, runId: 7 });
+  assert.deepEqual(result, {
+    kind: "passed",
+    testedBaseSha: baseSha,
+    testedHeadSha: headSha,
+    mergeSha,
+    runId: 7,
+  });
 });
 
 test("a pull request base SHA alone does not prove which base CI tested", () => {
-  const result = prove({ commits: [{ sha: mergeSha, parents: [headSha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }] });
+  const result = prove({
+    commits: [{ sha: mergeSha, parents: [headSha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }],
+  });
 
-  assert.deepEqual(result, { kind: "unproven", reason: "No pull_request workflow run proves the tested head/base merge commit." });
+  assert.deepEqual(result, {
+    kind: "unproven",
+    reason: "No pull_request workflow run proves the tested head/base merge commit.",
+  });
 });
 
 test("missing required checks make the result unproven", () => {
   const result = prove({ checkRuns: checkRuns.filter((check) => check.name !== "qiskit-backend") });
 
-  assert.deepEqual(result, { kind: "unproven", reason: "Required check qiskit-backend is absent from the tested check suite.", evidence });
+  assert.deepEqual(result, {
+    kind: "unproven",
+    reason: "Required check qiskit-backend is absent from the tested check suite.",
+    evidence,
+  });
 });
 
 test("a completed required check without a success conclusion is not accepted", () => {
-  const result = prove({ checkRuns: checkRuns.map((check) => check.name === "web" ? { ...check, conclusion: "skipped" } : check) });
+  const result = prove({
+    checkRuns: checkRuns.map((check) =>
+      check.name === "web" ? { ...check, conclusion: "skipped" } : check,
+    ),
+  });
 
-  assert.deepEqual(result, { kind: "failed", reason: "Required check web did not succeed.", evidence });
+  assert.deepEqual(result, {
+    kind: "failed",
+    reason: "Required check web did not succeed.",
+    evidence,
+  });
 });
 
 test("only a workflow run explicitly linked to this PR can prove its checks", () => {

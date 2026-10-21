@@ -42,14 +42,22 @@ class SqliteAdapter {
   async transaction(work) {
     let unlock;
     const previous = this.tail;
-    this.tail = new Promise((resolve) => { unlock = resolve; });
+    this.tail = new Promise((resolve) => {
+      unlock = resolve;
+    });
     await previous;
     this.database.exec("BEGIN IMMEDIATE");
     const database = this.database;
     const executor = {
-      async exec(query) { database.exec(query); },
-      async get(query, ...bindings) { return database.prepare(query).all(...bindings)[0]; },
-      async run(query, ...bindings) { database.prepare(query).run(...bindings); },
+      async exec(query) {
+        database.exec(query);
+      },
+      async get(query, ...bindings) {
+        return database.prepare(query).all(...bindings)[0];
+      },
+      async run(query, ...bindings) {
+        database.prepare(query).run(...bindings);
+      },
     };
     try {
       const result = await work(executor);
@@ -132,5 +140,8 @@ test("an invalidated SQLite result remains stale and cannot be completed", async
   });
   const row = await store.get(identity);
 
-  assert.deepEqual({ state: row.state, verdict: row.verdict, failureCode: row.failureCode }, { state: "stale", verdict: undefined, failureCode: "identity_changed" });
+  assert.deepEqual(
+    { state: row.state, verdict: row.verdict, failureCode: row.failureCode },
+    { state: "stale", verdict: undefined, failureCode: "identity_changed" },
+  );
 });

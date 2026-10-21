@@ -108,7 +108,10 @@ export class DurableReviewStore implements ReviewStore {
   async acceptNonce(nonce: string, acceptedAt: number): Promise<boolean> {
     if (!noncePattern.test(nonce) || !Number.isSafeInteger(acceptedAt)) return false;
     return this.database.transaction(async (transaction) => {
-      await transaction.run("DELETE FROM review_request_nonces WHERE accepted_at < ?", acceptedAt - nonceRetentionMs);
+      await transaction.run(
+        "DELETE FROM review_request_nonces WHERE accepted_at < ?",
+        acceptedAt - nonceRetentionMs,
+      );
       await transaction.run(
         "INSERT OR IGNORE INTO review_request_nonces (nonce, accepted_at) VALUES (?, ?)",
         nonce,
@@ -119,7 +122,11 @@ export class DurableReviewStore implements ReviewStore {
     });
   }
 
-  async reserve(identity: ReviewIdentity, snapshotHash: string, snapshot: ReviewSnapshot): Promise<"created" | "existing" | "conflict" | "stale"> {
+  async reserve(
+    identity: ReviewIdentity,
+    snapshotHash: string,
+    snapshot: ReviewSnapshot,
+  ): Promise<"created" | "existing" | "conflict" | "stale"> {
     return this.database.transaction(async (transaction) => {
       const existing = await transaction.get<ReviewRow>(
         "SELECT identity_key, identity_json, snapshot_hash, state, verdict_json, failure_code FROM review_jobs WHERE singleton = 1",
@@ -137,7 +144,8 @@ export class DurableReviewStore implements ReviewStore {
         );
         return "created";
       }
-      if (existing.identity_key !== key || existing.snapshot_hash !== snapshotHash) return "conflict";
+      if (existing.identity_key !== key || existing.snapshot_hash !== snapshotHash)
+        return "conflict";
       return existing.state === "stale" ? "stale" : "existing";
     });
   }
@@ -150,7 +158,10 @@ export class DurableReviewStore implements ReviewStore {
     return row === undefined ? undefined : decodeRow(row);
   }
 
-  async getSnapshot(identity: ReviewIdentity, snapshotHash: string): Promise<ReviewSnapshot | undefined> {
+  async getSnapshot(
+    identity: ReviewIdentity,
+    snapshotHash: string,
+  ): Promise<ReviewSnapshot | undefined> {
     const row = await this.database.get<{ snapshot_json: string }>(
       "SELECT snapshot_json FROM review_jobs WHERE singleton = 1 AND identity_key = ? AND snapshot_hash = ?",
       identityKey(identity),
@@ -170,12 +181,17 @@ export class DurableReviewStore implements ReviewStore {
       snapshot.identity.pullRequest !== identity.pullRequest ||
       snapshot.identity.headSha !== identity.headSha ||
       snapshot.identity.testedBaseSha !== identity.testedBaseSha ||
-      await sha256Hex(canonicalSnapshot(snapshot)) !== snapshotHash
-    ) return undefined;
+      (await sha256Hex(canonicalSnapshot(snapshot))) !== snapshotHash
+    )
+      return undefined;
     return snapshot;
   }
 
-  async complete(identity: ReviewIdentity, snapshotHash: string, verdict: ReviewVerdict): Promise<void> {
+  async complete(
+    identity: ReviewIdentity,
+    snapshotHash: string,
+    verdict: ReviewVerdict,
+  ): Promise<void> {
     await this.database.run(
       `UPDATE review_jobs SET state = 'complete', verdict_json = ?, failure_code = NULL, updated_at = ?
        WHERE singleton = 1 AND identity_key = ? AND snapshot_hash = ? AND state = 'pending'`,
@@ -209,7 +225,11 @@ export class DurableReviewStore implements ReviewStore {
       const row = await transaction.get<ReviewRow>(
         "SELECT identity_key, identity_json, snapshot_hash, state, verdict_json, failure_code FROM review_jobs WHERE singleton = 1",
       );
-      return row?.identity_key === identityKey(identity) && row.snapshot_hash === snapshotHash && row.state === "stale";
+      return (
+        row?.identity_key === identityKey(identity) &&
+        row.snapshot_hash === snapshotHash &&
+        row.state === "stale"
+      );
     });
   }
 }
@@ -230,7 +250,12 @@ export class DurableReviewRequestStore {
     return row === undefined ? undefined : decodeRequest(row);
   }
 
-  async reserve(input: Omit<ReviewRequest, "headSha" | "baseSha" | "title" | "state" | "snapshotHash" | "failureCode">): Promise<"created" | "existing" | "conflict"> {
+  async reserve(
+    input: Omit<
+      ReviewRequest,
+      "headSha" | "baseSha" | "title" | "state" | "snapshotHash" | "failureCode"
+    >,
+  ): Promise<"created" | "existing" | "conflict"> {
     return this.database.transaction(async (transaction) => {
       const existing = await transaction.get<ReviewRequestRow>(
         `SELECT review_id, operation_id, pull_request_url, pull_request_number, head_sha, base_sha, title, state, snapshot_hash, failure_code
@@ -254,12 +279,16 @@ export class DurableReviewRequestStore {
         existing.operation_id !== input.operationId ||
         existing.pull_request_url !== input.pullRequestUrl ||
         existing.pull_request_number !== input.pullRequestNumber
-      ) return "conflict";
+      )
+        return "conflict";
       return "existing";
     });
   }
 
-  async bindCandidate(reviewId: string, candidate: { headSha: string; baseSha: string; title: string }): Promise<boolean> {
+  async bindCandidate(
+    reviewId: string,
+    candidate: { headSha: string; baseSha: string; title: string },
+  ): Promise<boolean> {
     return this.database.transaction(async (transaction) => {
       const row = await transaction.get<ReviewRequestRow>(
         `SELECT review_id, operation_id, pull_request_url, pull_request_number, head_sha, base_sha, title, state, snapshot_hash, failure_code
@@ -268,7 +297,10 @@ export class DurableReviewRequestStore {
       );
       if (row === undefined || row.state === "stale") return false;
       if (row.head_sha !== null) {
-        const matches = row.head_sha === candidate.headSha && row.base_sha === candidate.baseSha && row.title === candidate.title;
+        const matches =
+          row.head_sha === candidate.headSha &&
+          row.base_sha === candidate.baseSha &&
+          row.title === candidate.title;
         if (!matches) {
           await transaction.run(
             "UPDATE review_request_jobs SET state = 'stale', failure_code = 'pull_request_changed', updated_at = ? WHERE singleton = 1 AND review_id = ?",
@@ -292,11 +324,22 @@ export class DurableReviewRequestStore {
          FROM review_request_jobs WHERE singleton = 1 AND review_id = ?`,
         reviewId,
       );
-      return saved?.head_sha === candidate.headSha && saved.base_sha === candidate.baseSha && saved.title === candidate.title;
+      return (
+        saved?.head_sha === candidate.headSha &&
+        saved.base_sha === candidate.baseSha &&
+        saved.title === candidate.title
+      );
     });
   }
 
-  async update(reviewId: string, update: { state: ReviewRequestState; snapshotHash?: string | null; failureCode?: string | null }): Promise<void> {
+  async update(
+    reviewId: string,
+    update: {
+      state: ReviewRequestState;
+      snapshotHash?: string | null;
+      failureCode?: string | null;
+    },
+  ): Promise<void> {
     await this.database.run(
       `UPDATE review_request_jobs SET state = ?, snapshot_hash = COALESCE(?, snapshot_hash), failure_code = ?, updated_at = ?
        WHERE singleton = 1 AND review_id = ?`,

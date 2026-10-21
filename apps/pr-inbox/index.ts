@@ -12,12 +12,7 @@ import {
   type SqlReader,
   type Webhook,
 } from "apps";
-import {
-  apiOrigin,
-  requirements,
-  type GitHubAccount,
-  type HookContext,
-} from "./providers.ts";
+import { apiOrigin, requirements, type GitHubAccount, type HookContext } from "./providers.ts";
 import {
   hasValidRepositoryAllowlist,
   pullRequestUrl,
@@ -25,7 +20,12 @@ import {
   repositoryPath,
   type RepositoryConfig,
 } from "./repositories.ts";
-import { notificationStatusQuery, processQueue, recentReviewsQuery, recoveryMutation } from "./processor.ts";
+import {
+  notificationStatusQuery,
+  processQueue,
+  recentReviewsQuery,
+  recoveryMutation,
+} from "./processor.ts";
 
 const hookState = object({ hookId: number() });
 const repositoryConfigSchema = object({ fullName: string(), id: number() });
@@ -49,13 +49,11 @@ const completedLeaseUntil = Number.MAX_SAFE_INTEGER;
 const apiTimeoutMs = 15_000;
 const registrationLeaseMs = 60_000;
 const supportedActions = new Set(["opened", "reopened", "synchronize"]);
-const deliveryIdPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const deliveryIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const signaturePattern = /^sha256=([0-9a-f]{64})$/i;
 const headShaPattern = /^[0-9a-f]{40}$/i;
 
-interface ReceiptRow
-  extends Record<string, string | number | null | ArrayBuffer> {
+interface ReceiptRow extends Record<string, string | number | null | ArrayBuffer> {
   delivery_id: string;
   event: "ping" | "pull_request";
   action: string | null;
@@ -98,9 +96,7 @@ function matchesRepository(value: unknown, repository: RepositoryConfig): boolea
 }
 
 function isDependabotBot(value: unknown): boolean {
-  return (
-    isRecord(value) && value.login === "dependabot[bot]" && value.type === "Bot"
-  );
+  return isRecord(value) && value.login === "dependabot[bot]" && value.type === "Bot";
 }
 
 function isPingPayload(payload: Record<string, unknown>): boolean {
@@ -121,11 +117,7 @@ function response(status: number): Response {
 
 async function readBoundedBody(
   request: Request,
-): Promise<
-  | { kind: "ok"; bytes: Uint8Array }
-  | { kind: "too-large" }
-  | { kind: "invalid" }
-> {
+): Promise<{ kind: "ok"; bytes: Uint8Array } | { kind: "too-large" } | { kind: "invalid" }> {
   if (request.body === null) return { kind: "ok", bytes: new Uint8Array() };
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -192,12 +184,7 @@ async function hasValidSignature(
       false,
       ["verify"],
     );
-    return await crypto.subtle.verify(
-      "HMAC",
-      key,
-      arrayBuffer(bytes),
-      arrayBuffer(body),
-    );
+    return await crypto.subtle.verify("HMAC", key, arrayBuffer(bytes), arrayBuffer(body));
   } catch {
     return false;
   }
@@ -206,21 +193,22 @@ async function hasValidSignature(
 function insertReceipt(sql: Sql, repository: string, receipt: ReceiptInput): boolean {
   const receivedAt = Date.now();
   return sql.transaction((transaction) => {
-    const inserted = transaction.exec(
-      `INSERT OR IGNORE INTO webhook_receipts
+    const inserted =
+      transaction.exec(
+        `INSERT OR IGNORE INTO webhook_receipts
         (delivery_id, event, action, repository, pull_request_number, head_sha, event_base_sha, pull_request_url, received_at, ping)
        VALUES (?, ?, ?, ?, CAST(? AS INTEGER), ?, ?, ?, CAST(? AS INTEGER), ?)`,
-      receipt.deliveryId,
-      receipt.event,
-      receipt.action,
-      repository,
-      receipt.pullRequestNumber,
-      receipt.headSha,
-      receipt.baseSha,
-      receipt.pullRequestUrl,
-      receivedAt,
-      receipt.ping,
-    ).rowsWritten > 0;
+        receipt.deliveryId,
+        receipt.event,
+        receipt.action,
+        repository,
+        receipt.pullRequestNumber,
+        receipt.headSha,
+        receipt.baseSha,
+        receipt.pullRequestUrl,
+        receivedAt,
+        receipt.ping,
+      ).rowsWritten > 0;
     if (inserted && receipt.event === "pull_request") {
       transaction.exec(
         `INSERT OR IGNORE INTO review_queue
@@ -325,8 +313,7 @@ async function handleIncoming(
 ): Promise<Response> {
   if (request.method !== "POST") return response(405);
   const signature = request.headers.get("x-hub-signature-256");
-  if (signature === null || signatureBytes(signature) === null)
-    return response(401);
+  if (signature === null || signatureBytes(signature) === null) return response(401);
 
   const contentLength = request.headers.get("content-length");
   if (contentLength !== null) {
@@ -339,14 +326,11 @@ async function handleIncoming(
   const body = await readBoundedBody(request);
   if (body.kind === "too-large") return response(413);
   if (body.kind === "invalid") return malformed();
-  if (!(await hasValidSignature(secret, signature, body.bytes)))
-    return response(401);
+  if (!(await hasValidSignature(secret, signature, body.bytes))) return response(401);
 
   let payload: unknown;
   try {
-    payload = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(body.bytes),
-    );
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body.bytes));
   } catch {
     return malformed();
   }
@@ -357,8 +341,7 @@ async function handleIncoming(
   if (event !== "ping" && event !== "pull_request") return ignored();
 
   const deliveryHeader = request.headers.get("x-github-delivery");
-  if (deliveryHeader === null || !deliveryIdPattern.test(deliveryHeader))
-    return malformed();
+  if (deliveryHeader === null || !deliveryIdPattern.test(deliveryHeader)) return malformed();
   const deliveryId = deliveryHeader.toLowerCase();
 
   const repository = repositoryFromAllowlist(payload.repository, config.repositories);
@@ -395,15 +378,13 @@ interface ReplacementConfig {
   registration: RegistrationConfig;
 }
 
-interface HookMigrationRow
-  extends Record<string, string | number | null | ArrayBuffer> {
+interface HookMigrationRow extends Record<string, string | number | null | ArrayBuffer> {
   hook_id: number | null;
   lease_token: string | null;
   lease_until: number | null;
 }
 
-interface HookMigrationDiagnosticRow
-  extends Record<string, string | number | null | ArrayBuffer> {
+interface HookMigrationDiagnosticRow extends Record<string, string | number | null | ArrayBuffer> {
   lease_token: string | null;
 }
 
@@ -447,9 +428,7 @@ function canonicalCallbackUrl(callbackUrl: string): boolean {
       url.search === "" &&
       url.hash === "" &&
       segments.length > 0 &&
-      segments.every(
-        (segment) => segment.length > 0 && !/%2f|%5c/i.test(segment),
-      )
+      segments.every((segment) => segment.length > 0 && !/%2f|%5c/i.test(segment))
     );
   } catch {
     return false;
@@ -505,17 +484,12 @@ function approvedReplacementInput(
 }
 
 /** Persist only a one-way binding for retry identity, never callback or secret values. */
-async function sha256Fingerprint(
-  domain: "callback" | "secret",
-  value: string,
-): Promise<string> {
+async function sha256Fingerprint(domain: "callback" | "secret", value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(`executor-hook-migration-v1:${domain}\0${value}`),
   );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function decodeMigrationState(value: string | null): HookMigrationState | null {
@@ -595,9 +569,7 @@ export function readHookMigrationDiagnostic(
     }
 
     const state =
-      typeof row.lease_token === "string"
-        ? decodeMigrationState(row.lease_token)
-        : null;
+      typeof row.lease_token === "string" ? decodeMigrationState(row.lease_token) : null;
     if (state === null || !safeSubscriptionId(state.subscriptionId)) {
       return {
         reservation: "present",
@@ -634,10 +606,7 @@ function claimHookMigration(
   identity: HookMigrationIdentity,
   recordId: string,
   hookId: number,
-):
-  | { kind: "acquired"; state: HookMigrationState }
-  | { kind: "complete" }
-  | { kind: "blocked" } {
+): { kind: "acquired"; state: HookMigrationState } | { kind: "complete" } | { kind: "blocked" } {
   const now = Date.now();
   const state: HookMigrationState = {
     version: 1,
@@ -717,11 +686,7 @@ function startHookMigrationPatch(
     : null;
 }
 
-function completeHookMigration(
-  sql: Sql,
-  state: HookMigrationState,
-  recordId: string,
-): boolean {
+function completeHookMigration(sql: Sql, state: HookMigrationState, recordId: string): boolean {
   const complete = { ...state, phase: "complete" as const };
   return (
     sql.exec(
@@ -761,10 +726,7 @@ async function githubRequest(
   signal: AbortSignal,
   body?: unknown,
 ): Promise<Response> {
-  const token =
-    account.method === "oauth"
-      ? account.fields.access_token
-      : account.fields.token;
+  const token = account.method === "oauth" ? account.fields.access_token : account.fields.token;
   try {
     return await context.fetch(`${apiOrigin}${path}`, {
       method,
@@ -785,10 +747,7 @@ async function githubRequest(
   }
 }
 
-function requireStatus(
-  response: Response,
-  expected: number | readonly number[],
-): void {
+function requireStatus(response: Response, expected: number | readonly number[]): void {
   if (response.status >= 300 && response.status < 400)
     throw new Error("GitHub API redirected the request.");
   const accepted = typeof expected === "number" ? [expected] : expected;
@@ -817,8 +776,7 @@ function parseHook(value: unknown): HookSummary {
     !isRecord(value.config) ||
     typeof value.config.url !== "string" ||
     typeof value.config.content_type !== "string" ||
-    (typeof value.config.insecure_ssl !== "string" &&
-      typeof value.config.insecure_ssl !== "number")
+    (typeof value.config.insecure_ssl !== "string" && typeof value.config.insecure_ssl !== "number")
   ) {
     throw new Error("GitHub API returned an invalid webhook record.");
   }
@@ -906,25 +864,14 @@ const githubWebhook = {
   config: replacementConfig,
   state: hookState,
   async register(context, { account, callbackUrl, config, secret, subscriptionId }) {
-    if (
-      !approvedReplacementInput(
-        account,
-        config,
-        subscriptionId,
-        callbackUrl,
-        secret,
-      )
-    ) {
+    if (!approvedReplacementInput(account, config, subscriptionId, callbackUrl, secret)) {
       throw new Error("Executor supplied invalid webhook replacement details.");
     }
 
     const registration = config.registration;
     const identity: HookMigrationIdentity = {
       subscriptionId,
-      originalCallbackHash: await sha256Fingerprint(
-        "callback",
-        registration.fromCallbackUrl,
-      ),
+      originalCallbackHash: await sha256Fingerprint("callback", registration.fromCallbackUrl),
       replacementCallbackHash: await sha256Fingerprint("callback", callbackUrl),
       secretFingerprint: await sha256Fingerprint("secret", secret),
     };
@@ -968,13 +915,7 @@ const githubWebhook = {
     let patchStarted = false;
     const path = `${repositoryPath({ fullName: registration.repository })}/hooks/${registration.hookId}`;
     try {
-      const existingResponse = await githubRequest(
-        context,
-        account,
-        path,
-        "GET",
-        signal,
-      );
+      const existingResponse = await githubRequest(context, account, path, "GET", signal);
       requireStatus(existingResponse, 200);
       const existing = parseHook(await responseJson(existingResponse));
       if (
@@ -984,40 +925,22 @@ const githubWebhook = {
         throw new Error("The approved GitHub webhook identity or settings differ.");
       }
 
-      const patching = startHookMigrationPatch(
-        context.sql,
-        state,
-        registration.migrationRecordId,
-      );
+      const patching = startHookMigrationPatch(context.sql, state, registration.migrationRecordId);
       if (patching === null) {
         throw new Error("The approved webhook replacement lease was lost.");
       }
       state = patching;
       patchStarted = true;
 
-      const update = await githubRequest(
-        context,
-        account,
-        `${path}/config`,
-        "PATCH",
-        signal,
-        { url: callbackUrl, secret },
-      );
+      const update = await githubRequest(context, account, `${path}/config`, "PATCH", signal, {
+        url: callbackUrl,
+        secret,
+      });
       requireStatus(update, 200);
 
-      const savedResponse = await githubRequest(
-        context,
-        account,
-        path,
-        "GET",
-        signal,
-      );
+      const savedResponse = await githubRequest(context, account, path, "GET", signal);
       requireStatus(savedResponse, 200);
-      const hookId = await verifySavedHook(
-        savedResponse,
-        registration.hookId,
-        callbackUrl,
-      );
+      const hookId = await verifySavedHook(savedResponse, registration.hookId, callbackUrl);
       if (!completeHookMigration(context.sql, state, registration.migrationRecordId)) {
         throw new Error("The approved webhook replacement could not be recorded.");
       }
@@ -1025,11 +948,7 @@ const githubWebhook = {
       return { hookId };
     } catch {
       if (!patchStarted) {
-        releaseHookMigrationPreflight(
-          context.sql,
-          state,
-          registration.migrationRecordId,
-        );
+        releaseHookMigrationPreflight(context.sql, state, registration.migrationRecordId);
       }
       throw new Error("GitHub webhook replacement failed; stop for operator recovery.");
     }
@@ -1044,18 +963,13 @@ const githubWebhook = {
     );
   },
   async unregister() {
-    throw new Error(
-      "GitHub webhook removal is outside the approved update-only scope.",
-    );
+    throw new Error("GitHub webhook removal is outside the approved update-only scope.");
   },
 } satisfies Webhook<HookContext, typeof replacementConfig, typeof hookState>;
 
 export { githubWebhook };
 
-export function readRecentReceipts(
-  sql: SqlReader,
-  requestedLimit?: number,
-): ReceiptRow[] {
+export function readRecentReceipts(sql: SqlReader, requestedLimit?: number): ReceiptRow[] {
   const limit =
     typeof requestedLimit === "number" && Number.isSafeInteger(requestedLimit)
       ? Math.min(maxReceipts, Math.max(1, requestedLimit))
@@ -1074,8 +988,7 @@ export function readRecentReceipts(
 const recentReceipts = query(
   {
     title: "GitHub webhook の受信記録",
-    description:
-      "署名済み ping と Dependabot のプルリクエスト通知を最近の順に読みます。",
+    description: "署名済み ping と Dependabot のプルリクエスト通知を最近の順に読みます。",
     input: object({ limit: number().optional() }),
   },
   async (context: QueryContext<typeof requirements>, { limit }) =>

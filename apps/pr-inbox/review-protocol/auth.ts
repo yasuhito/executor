@@ -9,7 +9,9 @@ function canonicalRequest(
   pathname: string,
   body: Uint8Array,
 ): Uint8Array<ArrayBuffer> {
-  const prefix = new TextEncoder().encode(`executor-review-v1\n${timestamp}\n${nonce}\n${method}\n${pathname}\n`);
+  const prefix = new TextEncoder().encode(
+    `executor-review-v1\n${timestamp}\n${nonce}\n${method}\n${pathname}\n`,
+  );
   const message = new Uint8Array(new ArrayBuffer(prefix.byteLength + body.byteLength));
   message.set(prefix);
   message.set(body, prefix.byteLength);
@@ -70,13 +72,15 @@ export async function verifyRequest(
     !/^\d{1,12}$/.test(timestamp) ||
     !noncePattern.test(nonce) ||
     !signaturePattern.test(signature)
-  ) return false;
+  )
+    return false;
 
   const timestampSeconds = Number(timestamp);
   if (
     !Number.isSafeInteger(timestampSeconds) ||
     Math.abs(nowSeconds - timestampSeconds) > maxClockSkewSeconds
-  ) return false;
+  )
+    return false;
 
   try {
     const key = await crypto.subtle.importKey(
@@ -90,17 +94,20 @@ export async function verifyRequest(
       "HMAC",
       key,
       fromHex(signature),
-      canonicalRequest(timestamp, nonce, request.method.toUpperCase(), new URL(request.url).pathname, body),
+      canonicalRequest(
+        timestamp,
+        nonce,
+        request.method.toUpperCase(),
+        new URL(request.url).pathname,
+        body,
+      ),
     );
   } catch {
     return false;
   }
 }
 
-export async function readBoundedBody(
-  request: Request,
-  limit: number,
-): Promise<Uint8Array | null> {
+export async function readBoundedBody(request: Request, limit: number): Promise<Uint8Array | null> {
   const declaredLength = request.headers.get("content-length");
   if (declaredLength !== null) {
     if (!/^\d+$/.test(declaredLength) || Number(declaredLength) > limit) return null;

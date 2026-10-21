@@ -3,11 +3,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import {
-  githubWebhook,
-  readHookMigrationDiagnostic,
-  readRecentReceipts,
-} from "../index.ts";
+import { githubWebhook, readHookMigrationDiagnostic, readRecentReceipts } from "../index.ts";
 
 const fixtureSecret = randomBytes(32).toString("base64url");
 const fixtureToken = randomBytes(32).toString("hex");
@@ -16,8 +12,16 @@ const targetUrl = "https://github.com/example-owner/example-repository/pull/42";
 
 async function createContext() {
   const database = new DatabaseSync(":memory:");
-  for (const migrationName of ["0001_webhook_receipts.sql", "0002_dependabot_review_queue.sql", "0003_url_only_review_telegram_pending.sql", "0004_multi_repository_config.sql"]) {
-    const migration = await readFile(new URL(`../migrations/${migrationName}`, import.meta.url), "utf8");
+  for (const migrationName of [
+    "0001_webhook_receipts.sql",
+    "0002_dependabot_review_queue.sql",
+    "0003_url_only_review_telegram_pending.sql",
+    "0004_multi_repository_config.sql",
+  ]) {
+    const migration = await readFile(
+      new URL(`../migrations/${migrationName}`, import.meta.url),
+      "utf8",
+    );
     database.exec(migration);
   }
   const workflowStarts = [];
@@ -32,8 +36,7 @@ async function createContext() {
           rowsWritten: 0,
           toArray: () => rows,
           one: () => {
-            if (rows.length !== 1)
-              throw new Error(`expected one row, found ${rows.length}`);
+            if (rows.length !== 1) throw new Error(`expected one row, found ${rows.length}`);
             return rows[0];
           },
           [Symbol.iterator]: () => rows[Symbol.iterator](),
@@ -102,16 +105,10 @@ function makePullRequest(overrides = {}) {
 
 function signedRequest(
   payload,
-  {
-    event = "pull_request",
-    delivery = "11111111-2222-4333-8444-555555555555",
-    rawBody,
-  } = {},
+  { event = "pull_request", delivery = "11111111-2222-4333-8444-555555555555", rawBody } = {},
 ) {
   const body = rawBody ?? JSON.stringify(payload);
-  const signature = createHmac("sha256", fixtureSecret)
-    .update(Buffer.from(body))
-    .digest("hex");
+  const signature = createHmac("sha256", fixtureSecret).update(Buffer.from(body)).digest("hex");
   return new Request("https://executor.invalid/webhook", {
     method: "POST",
     headers: {
@@ -148,7 +145,11 @@ test("stores only metadata from a signed Dependabot pull request", async () => {
   const { context, sql, workflowStarts } = await createContext();
   const response = await deliver(context, signedRequest(makePullRequest()));
   const rows = receiptRows(sql);
-  const queue = sql.exec("SELECT delivery_id, pull_request_number, event_head_sha, event_base_sha, state FROM review_queue").toArray();
+  const queue = sql
+    .exec(
+      "SELECT delivery_id, pull_request_number, event_head_sha, event_base_sha, state FROM review_queue",
+    )
+    .toArray();
 
   assert.deepEqual(
     {
@@ -214,9 +215,12 @@ test("accepts multiple configured repositories by matching both full name and nu
   });
   const mismatched = await deliver(
     context,
-    signedRequest(makePullRequest({
-      repository: { ...targetRepository, id: additionalRepository.id },
-    }), { delivery: "11111111-2222-4333-8444-555555555556" }),
+    signedRequest(
+      makePullRequest({
+        repository: { ...targetRepository, id: additionalRepository.id },
+      }),
+      { delivery: "11111111-2222-4333-8444-555555555556" },
+    ),
     config,
   );
   const accepted = await deliver(
@@ -225,18 +229,26 @@ test("accepts multiple configured repositories by matching both full name and nu
     config,
   );
 
-  assert.deepEqual({
-    statuses: [mismatched.status, accepted.status],
-    rows: receiptRows(sql).map(({ repository, pull_request_url }) => ({ repository, pull_request_url })),
-    workflowRepositories: workflowStarts.map(({ input }) => input.repository),
-  }, {
-    statuses: [202, 202],
-    rows: [{
-      repository: additionalRepository.full_name,
-      pull_request_url: "https://github.com/example-owner/another-repository/pull/42",
-    }],
-    workflowRepositories: [additionalRepository.full_name],
-  });
+  assert.deepEqual(
+    {
+      statuses: [mismatched.status, accepted.status],
+      rows: receiptRows(sql).map(({ repository, pull_request_url }) => ({
+        repository,
+        pull_request_url,
+      })),
+      workflowRepositories: workflowStarts.map(({ input }) => input.repository),
+    },
+    {
+      statuses: [202, 202],
+      rows: [
+        {
+          repository: additionalRepository.full_name,
+          pull_request_url: "https://github.com/example-owner/another-repository/pull/42",
+        },
+      ],
+      workflowRepositories: [additionalRepository.full_name],
+    },
+  );
 });
 
 test("deduplicates concurrent redelivery of the same signed event", async () => {
@@ -257,22 +269,34 @@ test("deduplicates concurrent redelivery of the same signed event", async () => 
       statuses: [202, 202],
       count: 1,
       queueCount: 1,
-      workflowKeys: ["hook:11111111-2222-4333-8444-555555555555", "hook:11111111-2222-4333-8444-555555555555"],
+      workflowKeys: [
+        "hook:11111111-2222-4333-8444-555555555555",
+        "hook:11111111-2222-4333-8444-555555555555",
+      ],
     },
   );
 });
 
 test("deduplicates different deliveries for the same pull-request head and base", async () => {
   const { context, sql } = await createContext();
-  const first = await deliver(context, signedRequest(makePullRequest(), { delivery: "11111111-2222-4333-8444-555555555555" }));
-  const second = await deliver(context, signedRequest(makePullRequest(), { delivery: "22222222-3333-4444-8555-666666666666" }));
+  const first = await deliver(
+    context,
+    signedRequest(makePullRequest(), { delivery: "11111111-2222-4333-8444-555555555555" }),
+  );
+  const second = await deliver(
+    context,
+    signedRequest(makePullRequest(), { delivery: "22222222-3333-4444-8555-666666666666" }),
+  );
 
-  assert.deepEqual([
-    first.status,
-    second.status,
-    receiptRows(sql).length,
-    sql.exec("SELECT delivery_id FROM review_queue").toArray().length,
-  ], [202, 202, 2, 1]);
+  assert.deepEqual(
+    [
+      first.status,
+      second.status,
+      receiptRows(sql).length,
+      sql.exec("SELECT delivery_id FROM review_queue").toArray().length,
+    ],
+    [202, 202, 2, 1],
+  );
 });
 
 test("a new reopened delivery can requeue the same candidate after a terminal result", async () => {
@@ -281,13 +305,24 @@ test("a new reopened delivery can requeue the same candidate after a terminal re
   const secondId = "22222222-3333-4444-8555-666666666666";
   const first = await deliver(context, signedRequest(makePullRequest(), { delivery: firstId }));
   sql.exec("UPDATE review_queue SET state = 'complete' WHERE delivery_id = ?", firstId);
-  const second = await deliver(context, signedRequest(makePullRequest({ action: "reopened" }), { delivery: secondId }));
-  const queue = sql.exec("SELECT delivery_id, state FROM review_queue ORDER BY delivery_id").toArray();
+  const second = await deliver(
+    context,
+    signedRequest(makePullRequest({ action: "reopened" }), { delivery: secondId }),
+  );
+  const queue = sql
+    .exec("SELECT delivery_id, state FROM review_queue ORDER BY delivery_id")
+    .toArray();
 
-  assert.deepEqual({ statuses: [first.status, second.status], queue: queue.map(({ ...row }) => row) }, {
-    statuses: [202, 202],
-    queue: [{ delivery_id: firstId, state: "complete" }, { delivery_id: secondId, state: "queued" }],
-  });
+  assert.deepEqual(
+    { statuses: [first.status, second.status], queue: queue.map(({ ...row }) => row) },
+    {
+      statuses: [202, 202],
+      queue: [
+        { delivery_id: firstId, state: "complete" },
+        { delivery_id: secondId, state: "queued" },
+      ],
+    },
+  );
 });
 
 test("a reopened delivery during processing queues a serialized follow-up", async () => {
@@ -299,13 +334,24 @@ test("a reopened delivery during processing queues a serialized follow-up", asyn
     "UPDATE review_queue SET state = 'processing', run_id = 'run-1', fencing = 1, lease_until = 999999999999 WHERE delivery_id = ?",
     firstId,
   );
-  const second = await deliver(context, signedRequest(makePullRequest({ action: "reopened" }), { delivery: secondId }));
-  const queue = sql.exec("SELECT delivery_id, state FROM review_queue ORDER BY delivery_id").toArray();
+  const second = await deliver(
+    context,
+    signedRequest(makePullRequest({ action: "reopened" }), { delivery: secondId }),
+  );
+  const queue = sql
+    .exec("SELECT delivery_id, state FROM review_queue ORDER BY delivery_id")
+    .toArray();
 
-  assert.deepEqual({ statuses: [first.status, second.status], queue: queue.map(({ ...row }) => row) }, {
-    statuses: [202, 202],
-    queue: [{ delivery_id: firstId, state: "processing" }, { delivery_id: secondId, state: "queued" }],
-  });
+  assert.deepEqual(
+    { statuses: [first.status, second.status], queue: queue.map(({ ...row }) => row) },
+    {
+      statuses: [202, 202],
+      queue: [
+        { delivery_id: firstId, state: "processing" },
+        { delivery_id: secondId, state: "queued" },
+      ],
+    },
+  );
 });
 
 test("checks the HMAC against the original request bytes", async () => {
@@ -381,10 +427,7 @@ test("rejects missing and incorrect signatures without writes", async () => {
     },
     body: JSON.stringify(makePullRequest()),
   });
-  const responses = await Promise.all([
-    deliver(context, missing),
-    deliver(context, incorrect),
-  ]);
+  const responses = await Promise.all([deliver(context, missing), deliver(context, incorrect)]);
 
   assert.deepEqual(
     {
@@ -464,10 +507,7 @@ test("ignores unsupported events, actions, authors, and repository identities", 
 
 test("refuses malformed signed JSON without writes", async () => {
   const { context, sql } = await createContext();
-  const response = await deliver(
-    context,
-    signedRequest(null, { rawBody: "{not-json" }),
-  );
+  const response = await deliver(context, signedRequest(null, { rawBody: "{not-json" }));
 
   assert.deepEqual(
     { status: response.status, count: receiptRows(sql).length },
@@ -478,10 +518,7 @@ test("refuses malformed signed JSON without writes", async () => {
 test("rejects an oversized signed body without writes", async () => {
   const { context, sql } = await createContext();
   const oversized = "x".repeat(1024 * 1024 + 1);
-  const response = await deliver(
-    context,
-    signedRequest(null, { rawBody: oversized }),
-  );
+  const response = await deliver(context, signedRequest(null, { rawBody: oversized }));
 
   assert.deepEqual(
     { status: response.status, count: receiptRows(sql).length },
@@ -597,11 +634,14 @@ test("registration diagnostic does not expose malformed reservation data", async
 });
 
 test("registration diagnostic maps unreadable storage to a closed failure class", () => {
-  const diagnostic = readHookMigrationDiagnostic({
-    exec() {
-      throw new Error("private storage failure");
+  const diagnostic = readHookMigrationDiagnostic(
+    {
+      exec() {
+        throw new Error("private storage failure");
+      },
     },
-  }, diagnosticReservationId);
+    diagnosticReservationId,
+  );
 
   assert.deepEqual(diagnostic, {
     reservation: "unavailable",
@@ -613,12 +653,15 @@ test("registration diagnostic maps unreadable storage to a closed failure class"
 
 test("registration diagnostic issues only a SELECT for its reserved row", () => {
   const statements = [];
-  const diagnostic = readHookMigrationDiagnostic({
-    exec(statement, ...bindings) {
-      statements.push({ statement, bindings });
-      return { toArray: () => [] };
+  const diagnostic = readHookMigrationDiagnostic(
+    {
+      exec(statement, ...bindings) {
+        statements.push({ statement, bindings });
+        return { toArray: () => [] };
+      },
     },
-  }, diagnosticReservationId);
+    diagnosticReservationId,
+  );
 
   assert.deepEqual(
     { diagnostic, statements },
@@ -631,8 +674,7 @@ test("registration diagnostic issues only a SELECT for its reserved row", () => 
       },
       statements: [
         {
-          statement:
-            "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
+          statement: "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
           bindings: [diagnosticReservationId],
         },
       ],
@@ -645,8 +687,7 @@ const approvedSubscriptionId = "whk_test-source-subscription";
 const approvedSourceAccountId = "acc_test-source-account";
 const approvedOriginalCallbackUrl =
   "https://executor.example.invalid/webhooks/original-subscription";
-const replacementCallbackUrl =
-  "https://executor.example.invalid/webhooks/replacement-subscription";
+const replacementCallbackUrl = "https://executor.example.invalid/webhooks/replacement-subscription";
 const replacementSubscriptionId = "whk_test-replacement-subscription";
 const approvedHookPath = `/repos/example-owner/example-repository/hooks/${approvedHookId}`;
 const approvedHookConfigPath = `${approvedHookPath}/config`;
@@ -807,10 +848,7 @@ test("replacement registration patches the approved hook and replaces the source
     targetRepository.id,
     "https://old-review.example.invalid",
   );
-  const outcome = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const outcome = await registrationOutcome(fixture.context, registrationInput());
 
   assert.deepEqual(
     {
@@ -818,16 +856,22 @@ test("replacement registration patches the approved hook and replaces the source
       requests: fixture.calls.map(({ method, path, body }) => ({
         method,
         path,
-        body: body === undefined ? null : {
-          keys: Object.keys(body).sort(),
-          url: body.url,
-          hostSecretTransported: body.secret === fixtureSecret,
-        },
+        body:
+          body === undefined
+            ? null
+            : {
+                keys: Object.keys(body).sort(),
+                url: body.url,
+                hostSecretTransported: body.secret === fixtureSecret,
+              },
       })),
       hook: visibleHook(fixture.currentHook()),
-      configuredRepositories: fixture.context.sql.exec(
-        "SELECT subscription_id, full_name, repository_id, review_worker_url FROM configured_repositories",
-      ).toArray().map(({ ...row }) => row),
+      configuredRepositories: fixture.context.sql
+        .exec(
+          "SELECT subscription_id, full_name, repository_id, review_worker_url FROM configured_repositories",
+        )
+        .toArray()
+        .map(({ ...row }) => row),
       resultLeaksSecret: JSON.stringify(outcome).includes(fixtureSecret),
     },
     {
@@ -856,12 +900,14 @@ test("replacement registration patches the approved hook and replaces the source
           insecure_ssl: "0",
         },
       },
-      configuredRepositories: [{
-        subscription_id: replacementSubscriptionId,
-        full_name: targetRepository.full_name,
-        repository_id: targetRepository.id,
-        review_worker_url: reviewWorkerUrl,
-      }],
+      configuredRepositories: [
+        {
+          subscription_id: replacementSubscriptionId,
+          full_name: targetRepository.full_name,
+          repository_id: targetRepository.id,
+          review_worker_url: reviewWorkerUrl,
+        },
+      ],
       resultLeaksSecret: false,
     },
   );
@@ -881,10 +927,7 @@ test("the same replacement registration retries without repeating the GitHub pat
       resultLeaksSecret: JSON.stringify([first, second]).includes(fixtureSecret),
     },
     {
-      outcomes: [
-        { result: { hookId: approvedHookId } },
-        { result: { hookId: approvedHookId } },
-      ],
+      outcomes: [{ result: { hookId: approvedHookId } }, { result: { hookId: approvedHookId } }],
       requests: [
         { method: "GET", path: approvedHookPath },
         { method: "PATCH", path: approvedHookConfigPath },
@@ -899,18 +942,17 @@ test("the same replacement registration retries without repeating the GitHub pat
 
 test("a changed secret cannot reuse a completed registration ID", async () => {
   const fixture = await registrationFixture();
-  const first = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const first = await registrationOutcome(fixture.context, registrationInput());
   const second = await registrationOutcome(
     fixture.context,
     registrationInput({ secret: "different-fixture-secret" }),
   );
-  const marker = fixture.context.sql.exec(
-    "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
-    diagnosticReservationId,
-  ).one().lease_token;
+  const marker = fixture.context.sql
+    .exec(
+      "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
+      diagnosticReservationId,
+    )
+    .one().lease_token;
 
   assert.deepEqual(
     {
@@ -933,20 +975,16 @@ test("a changed secret cannot reuse a completed registration ID", async () => {
 test("long secrets are not fingerprinted as their effective HMAC key", async () => {
   const secret = "fixture-secret-".repeat(8);
   const fixture = await registrationFixture();
-  const outcome = await registrationOutcome(
-    fixture.context,
-    registrationInput({ secret }),
-  );
+  const outcome = await registrationOutcome(fixture.context, registrationInput({ secret }));
   const marker = JSON.parse(
-    fixture.context.sql.exec(
-      "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
-      diagnosticReservationId,
-    ).one().lease_token,
+    fixture.context.sql
+      .exec(
+        "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
+        diagnosticReservationId,
+      )
+      .one().lease_token,
   );
-  const rawDigest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(secret),
-  );
+  const rawDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   const rawFingerprint = Array.from(new Uint8Array(rawDigest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
@@ -965,15 +1003,9 @@ test("long secrets are not fingerprinted as their effective HMAC key", async () 
 
 test("concurrent attempts for one replacement serialize to one GitHub PATCH", async () => {
   const fixture = await registrationFixture({ holdPreflight: true });
-  const firstPending = registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const firstPending = registrationOutcome(fixture.context, registrationInput());
   await fixture.preflightStarted;
-  const second = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const second = await registrationOutcome(fixture.context, registrationInput());
   fixture.releasePreflight();
   const first = await firstPending;
 
@@ -1015,10 +1047,7 @@ test("the original subscription cannot register through the replacement source",
 
 test("a different subscription cannot take over after the replacement is complete", async () => {
   const fixture = await registrationFixture();
-  const first = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const first = await registrationOutcome(fixture.context, registrationInput());
   const second = await registrationOutcome(
     fixture.context,
     registrationInput({ subscriptionId: "whk_test-other-subscription" }),
@@ -1044,10 +1073,7 @@ test("a different subscription cannot take over after the replacement is complet
 
 test("missing hook stops before any GitHub mutation", async () => {
   const fixture = await registrationFixture({ preflightStatus: 404 });
-  const outcome = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const outcome = await registrationOutcome(fixture.context, registrationInput());
 
   assert.deepEqual(
     {
@@ -1089,10 +1115,7 @@ test("the same registration can retry after a preflight failure", async () => {
 
 test("a different registration stays blocked after preflight failure", async () => {
   const fixture = await registrationFixture({ preflightStatus: 404 });
-  const first = await registrationOutcome(
-    fixture.context,
-    registrationInput(),
-  );
+  const first = await registrationOutcome(fixture.context, registrationInput());
   const second = await registrationOutcome(
     fixture.context,
     registrationInput({ subscriptionId: "whk_test-other-subscription" }),
@@ -1117,7 +1140,10 @@ const mismatchedHooks = [
   ["name", configuredHook({ name: "other" })],
   ["active state", configuredHook({ active: false })],
   ["event list", configuredHook({ events: ["pull_request", "push"] })],
-  ["original callback", configuredHook({ config: { url: "https://executor.example.invalid/webhooks/other" } })],
+  [
+    "original callback",
+    configuredHook({ config: { url: "https://executor.example.invalid/webhooks/other" } }),
+  ],
   ["content type", configuredHook({ config: { content_type: "form" } })],
   ["TLS setting", configuredHook({ config: { insecure_ssl: "1" } })],
   ["missing TLS setting", configuredHook({ config: { insecure_ssl: undefined } })],
@@ -1125,10 +1151,7 @@ const mismatchedHooks = [
 for (const [setting, hook] of mismatchedHooks) {
   test(`replacement stops on a mismatched ${setting} before mutation`, async () => {
     const fixture = await registrationFixture({ initialHook: hook });
-    const outcome = await registrationOutcome(
-      fixture.context,
-      registrationInput(),
-    );
+    const outcome = await registrationOutcome(fixture.context, registrationInput());
 
     assert.deepEqual(
       {
@@ -1146,24 +1169,46 @@ for (const [setting, hook] of mismatchedHooks) {
 const invalidRegistrationInputs = [
   ["empty source subscription", { config: withRegistration({ sourceSubscriptionId: "" }) }],
   ["empty migration record ID", { config: withRegistration({ migrationRecordId: "" }) }],
-  ["registration repository outside the allowlist", { config: withRegistration({ repository: "example-owner/another-repository" }) }],
+  [
+    "registration repository outside the allowlist",
+    { config: withRegistration({ repository: "example-owner/another-repository" }) },
+  ],
   ["empty repository allowlist", { config: replacementConfig({ repositories: [] }) }],
-  ["duplicate repository allowlist entry", { config: replacementConfig({ repositories: [targetRepository, targetRepository].map(({ id, full_name }) => ({ id, fullName: full_name })) }) }],
-  ["non-HTTPS review worker URL", { config: replacementConfig({ reviewWorkerUrl: "http://review.example.invalid" }) }],
-  ["review worker URL with a path", { config: replacementConfig({ reviewWorkerUrl: "https://review.example.invalid/path" }) }],
-  ["wrong GitHub account", { account: { id: "acc_wrong", method: "token", fields: { token: fixtureToken } } }],
+  [
+    "duplicate repository allowlist entry",
+    {
+      config: replacementConfig({
+        repositories: [targetRepository, targetRepository].map(({ id, full_name }) => ({
+          id,
+          fullName: full_name,
+        })),
+      }),
+    },
+  ],
+  [
+    "non-HTTPS review worker URL",
+    { config: replacementConfig({ reviewWorkerUrl: "http://review.example.invalid" }) },
+  ],
+  [
+    "review worker URL with a path",
+    { config: replacementConfig({ reviewWorkerUrl: "https://review.example.invalid/path" }) },
+  ],
+  [
+    "wrong GitHub account",
+    { account: { id: "acc_wrong", method: "token", fields: { token: fixtureToken } } },
+  ],
   ["noncanonical callback origin", { callbackUrl: "https://other.example/webhooks/replacement" }],
   ["callback with query", { callbackUrl: `${replacementCallbackUrl}?token=unsafe` }],
-  ["callback with user info", { callbackUrl: "https://user@executor.example.invalid/webhooks/replacement" }],
+  [
+    "callback with user info",
+    { callbackUrl: "https://user@executor.example.invalid/webhooks/replacement" },
+  ],
   ["callback equal to original", { callbackUrl: approvedOriginalCallbackUrl }],
 ];
 for (const [setting, override] of invalidRegistrationInputs) {
   test(`replacement rejects ${setting} without contacting GitHub`, async () => {
     const fixture = await registrationFixture();
-    const outcome = await registrationOutcome(
-      fixture.context,
-      registrationInput(override),
-    );
+    const outcome = await registrationOutcome(fixture.context, registrationInput(override));
 
     assert.deepEqual(
       { outcome, requests: fixture.calls.length },

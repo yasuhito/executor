@@ -29,7 +29,8 @@ export async function githubRequest(
   method: GitHubMethod,
   body?: unknown,
 ): Promise<Response> {
-  if (!path.startsWith(`${repositoryPath(repository)}/`)) throw new Error("GitHub request path is outside the configured repository.");
+  if (!path.startsWith(`${repositoryPath(repository)}/`))
+    throw new Error("GitHub request path is outside the configured repository.");
   try {
     const response = await context.fetch(`${apiOrigin}${path}`, {
       method,
@@ -45,16 +46,21 @@ export async function githubRequest(
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    if (response.status >= 300 && response.status < 400) throw new Error("GitHub API redirected the request.");
+    if (response.status >= 300 && response.status < 400)
+      throw new Error("GitHub API redirected the request.");
     return response;
   } catch {
     throw new Error("GitHub API request failed.");
   }
 }
 
-export function requireGitHubStatus(response: Response, expected: number | readonly number[]): void {
+export function requireGitHubStatus(
+  response: Response,
+  expected: number | readonly number[],
+): void {
   const accepted = typeof expected === "number" ? [expected] : expected;
-  if (!accepted.includes(response.status)) throw new Error(`GitHub API returned HTTP ${response.status}.`);
+  if (!accepted.includes(response.status))
+    throw new Error(`GitHub API returned HTTP ${response.status}.`);
 }
 
 export async function githubResponseJson(response: Response): Promise<unknown> {

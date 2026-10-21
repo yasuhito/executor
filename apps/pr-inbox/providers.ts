@@ -86,7 +86,9 @@ export const telegram = defineProvider({
     }),
   },
   async health({ account, fetch, signal }) {
-    const response = await fetch(`https://api.telegram.org/bot${account.fields.token}/getMe`, { signal });
+    const response = await fetch(`https://api.telegram.org/bot${account.fields.token}/getMe`, {
+      signal,
+    });
     await decodeJson(response, object({ ok: boolean() }));
   },
 });

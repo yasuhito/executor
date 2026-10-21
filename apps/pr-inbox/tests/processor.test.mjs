@@ -32,21 +32,40 @@ test("successful merges do not create Telegram notification records", async () =
 test("actionable failures produce a queued Telegram notification record", async () => {
   const result = {
     kind: "needs-attention",
-    notices: [{ kind: "needs-attention", identity: null, snapshotHash: null, detail: "Required CI is unproven." }],
+    notices: [
+      {
+        kind: "needs-attention",
+        identity: null,
+        snapshotHash: null,
+        detail: "Required CI is unproven.",
+      },
+    ],
   };
   const records = await notificationsForResult(queueItem, result);
 
-  assert.deepEqual(records.map(({ kind, headSha, testedBaseSha }) => ({ kind, headSha, testedBaseSha })), [{
-    kind: "needs-attention",
-    headSha: identity.headSha,
-    testedBaseSha: null,
-  }]);
+  assert.deepEqual(
+    records.map(({ kind, headSha, testedBaseSha }) => ({ kind, headSha, testedBaseSha })),
+    [
+      {
+        kind: "needs-attention",
+        headSha: identity.headSha,
+        testedBaseSha: null,
+      },
+    ],
+  );
 });
 
 test("notifications without a resolved review identity deduplicate by webhook base", async () => {
   const result = {
     kind: "needs-attention",
-    notices: [{ kind: "needs-attention", identity: null, snapshotHash: null, detail: "The webhook base could not be reviewed." }],
+    notices: [
+      {
+        kind: "needs-attention",
+        identity: null,
+        snapshotHash: null,
+        detail: "The webhook base could not be reviewed.",
+      },
+    ],
   };
   const first = await notificationsForResult(queueItem, result);
   const otherBase = "fedcba9876543210fedcba9876543210fedcba98";
@@ -59,7 +78,11 @@ test("review invalidation sends the queue mutation's lease expiry", async () => 
   const renewalSteps = [];
   let invalidationBody;
   const stepContext = {
-    app: { accounts: { reviewService: { fields: { hmacSecret: "test-only-review-secret-0123456789abcdef" } } } },
+    app: {
+      accounts: {
+        reviewService: { fields: { hmacSecret: "test-only-review-secret-0123456789abcdef" } },
+      },
+    },
     signal: new AbortController().signal,
     fetch: async (_url, init) => {
       invalidationBody = JSON.parse(init.body);
@@ -96,33 +119,57 @@ test("review invalidation sends the queue mutation's lease expiry", async () => 
 
   await port.invalidate(reviewId);
 
-  assert.deepEqual({ renewalSteps: renewalSteps.length, body: invalidationBody }, {
-    renewalSteps: 2,
-    body: { reviewId, leaseExpiresAt },
-  });
+  assert.deepEqual(
+    { renewalSteps: renewalSteps.length, body: invalidationBody },
+    {
+      renewalSteps: 2,
+      body: { reviewId, leaseExpiresAt },
+    },
+  );
 });
 
 test("notifications exclude arbitrary detail, findings, evidence and failure strings", async () => {
   const secret = "PRIVATE-DIFF-SECRET";
-  const notice = { kind: "needs-attention", identity, snapshotHash, detail: secret, verdict: {
-    standards: { status: "findings", findings: [{ path: secret, summary: secret, evidence: secret }] },
-    changeIntent: { status: "pass", findings: [] },
-  } };
-  const generic = await notificationsForResult(queueItem, { failureCode: secret, notices: [notice] });
-  const ciFailure = await notificationsForResult(queueItem, { failureCode: "required_ci_failed", notices: [notice] });
-  const reauth = await notificationsForResult(queueItem, { failureCode: "reauth_required", notices: [notice] });
-
-  assert.deepEqual({
-    secretLeaked: generic[0].message.includes(secret),
-    standardsSummaryIncluded: generic[0].message.includes("Standards: findings (1)"),
-    genericCode: generic[0].message.includes("Failure code: review_attention"),
-    ciFailureCode: ciFailure[0].message.includes("Failure code: required_ci_failed"),
-    reauthCode: reauth[0].message.includes("Failure code: reauth_required"),
-  }, {
-    secretLeaked: false,
-    standardsSummaryIncluded: true,
-    genericCode: true,
-    ciFailureCode: true,
-    reauthCode: true,
+  const notice = {
+    kind: "needs-attention",
+    identity,
+    snapshotHash,
+    detail: secret,
+    verdict: {
+      standards: {
+        status: "findings",
+        findings: [{ path: secret, summary: secret, evidence: secret }],
+      },
+      changeIntent: { status: "pass", findings: [] },
+    },
+  };
+  const generic = await notificationsForResult(queueItem, {
+    failureCode: secret,
+    notices: [notice],
   });
+  const ciFailure = await notificationsForResult(queueItem, {
+    failureCode: "required_ci_failed",
+    notices: [notice],
+  });
+  const reauth = await notificationsForResult(queueItem, {
+    failureCode: "reauth_required",
+    notices: [notice],
+  });
+
+  assert.deepEqual(
+    {
+      secretLeaked: generic[0].message.includes(secret),
+      standardsSummaryIncluded: generic[0].message.includes("Standards: findings (1)"),
+      genericCode: generic[0].message.includes("Failure code: review_attention"),
+      ciFailureCode: ciFailure[0].message.includes("Failure code: required_ci_failed"),
+      reauthCode: reauth[0].message.includes("Failure code: reauth_required"),
+    },
+    {
+      secretLeaked: false,
+      standardsSummaryIncluded: true,
+      genericCode: true,
+      ciFailureCode: true,
+      reauthCode: true,
+    },
+  );
 });
