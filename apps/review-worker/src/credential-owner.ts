@@ -168,9 +168,24 @@ export class CredentialDurableObject extends DurableObject<Env> {
   }
 
   private async statusResponse(): Promise<Response> {
-    const configured = (await this.credentials.list()).some(
-      ({ providerId }) => providerId === "openai",
-    );
+    let configured: boolean;
+    try {
+      configured = (await this.credentials.list()).some(
+        ({ providerId }) => providerId === "openai",
+      );
+    } catch (error) {
+      const errorClass = errorClassName(error);
+      if (errorClass !== "OperationError") throw error;
+      console.error("Credential status decryption failed", { errorClass });
+      return Response.json(
+        {
+          status: "unconfigured",
+          errorCode: "crypto_operation_failed",
+          reauthRequired: true,
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
     const reauthRequired = this.readAuthState() === "reauth_required";
     return Response.json(
       { status: configured ? "configured" : "unconfigured", reauthRequired },
@@ -214,7 +229,7 @@ export class CredentialDurableObject extends DurableObject<Env> {
         } catch {
           return reply(400, "invalid_credential");
         }
-        await this.credentials.modify("openai", async () => value.credential);
+        await this.credentials.replace("openai", value.credential);
         this.writeAuthState("ready", null);
       } else if (url.pathname.endsWith("/revoke")) {
         await this.credentials.delete("openai");
