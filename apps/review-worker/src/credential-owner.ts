@@ -9,8 +9,32 @@ import type { Env } from "./index.ts";
 export const credentialOwnerName = "installation";
 type AuthState = "ready" | "reauth_required";
 type AuthCheck = "ready" | "reauth_required" | "unavailable";
-const reply = (status: number, state: string) =>
-  Response.json({ status: state }, { status, headers: { "cache-control": "no-store" } });
+const reply = (status: number, state: string, errorCode?: string) =>
+  Response.json(
+    { status: state, ...(errorCode === undefined ? {} : { errorCode }) },
+    { status, headers: { "cache-control": "no-store" } },
+  );
+
+function errorClassName(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("name" in error)) return "UnknownError";
+  return typeof error.name === "string" && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+    ? error.name
+    : "UnknownError";
+}
+
+function operationErrorCode(error: unknown, errorClass: string): string {
+  if (errorClass === "OperationError") return "crypto_operation_failed";
+  if (
+    errorClass === "InvalidCharacterError" ||
+    (typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      error.message === "Invalid credential encryption binding")
+  ) {
+    return "invalid_encryption_binding";
+  }
+  return "credential_operation_failed";
+}
 
 function errorText(error: unknown): string {
   const parts: string[] = [];
@@ -196,11 +220,14 @@ export class CredentialDurableObject extends DurableObject<Env> {
         await this.credentials.delete("openai");
         this.writeAuthState("reauth_required", "operator_revoked");
       } else if (url.pathname.endsWith("/status")) {
-        return this.statusResponse();
+        return await this.statusResponse();
       }
-      return this.statusResponse();
-    } catch {
-      return reply(503, "credential_operation_failed");
+      return await this.statusResponse();
+    } catch (error) {
+      const errorClass = errorClassName(error);
+      console.error("Credential operation failed", { errorClass });
+      const errorCode = operationErrorCode(error, errorClass);
+      return reply(503, "credential_operation_failed", errorCode);
     }
   }
 }
