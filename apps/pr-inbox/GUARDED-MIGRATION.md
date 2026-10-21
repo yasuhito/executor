@@ -57,9 +57,10 @@ Only absence of both matching URLs and the approved hook ID allows one POST with
 verifies its current target. A 404 for that hook triggers a fresh exhaustive list.
 If the fully paginated list has no original or target callback and neither the
 recorded nor approved hook ID exists at another URL, the same registration may
-recreate the hook only when no other live owner references either missing ID. The migration is durably marked `patching` before
-POST; success requires GET readback and updates both the owner row and returned
-subscription state with the new hook ID. An ambiguous POST or readback remains
+recreate the hook only when no other live owner references either missing ID.
+The migration is durably marked `patching` before POST; success requires GET
+readback and updates both the owner row and returned subscription state with the
+new hook ID. An ambiguous POST or readback remains
 unresolved and blocks retry. Changed identity is rejected. Lost mutation responses
 require operator investigation, not a new record ID or clearing a lock.
 
