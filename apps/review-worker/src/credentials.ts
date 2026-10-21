@@ -93,6 +93,24 @@ export class EncryptedCredentialStore implements CredentialStore {
       (await this.load()) ? [{ providerId: "openai", type: "oauth" as const }] : [],
     );
   }
+  private async persist(next: Credential): Promise<Credential> {
+    validateCredential(next);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce, additionalData: metadata },
+      await this.key(),
+      new TextEncoder().encode(JSON.stringify(next)),
+    );
+    this.backend.write({
+      version: 1,
+      nonce: [...nonce],
+      ciphertext: [...new Uint8Array(ciphertext)],
+    });
+    return structuredClone(next);
+  }
+  replace(provider: string, next: Credential, options?: AuthOperationOptions) {
+    return this.queued(provider, options, () => this.persist(next));
+  }
   modify(
     provider: string,
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
@@ -102,19 +120,7 @@ export class EncryptedCredentialStore implements CredentialStore {
       const current = await this.load();
       const next = await fn(current);
       if (next === undefined) return current;
-      validateCredential(next);
-      const nonce = crypto.getRandomValues(new Uint8Array(12));
-      const ciphertext = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv: nonce, additionalData: metadata },
-        await this.key(),
-        new TextEncoder().encode(JSON.stringify(next)),
-      );
-      this.backend.write({
-        version: 1,
-        nonce: [...nonce],
-        ciphertext: [...new Uint8Array(ciphertext)],
-      });
-      return structuredClone(next);
+      return this.persist(next);
     });
   }
   delete(provider: string, options?: AuthOperationOptions) {

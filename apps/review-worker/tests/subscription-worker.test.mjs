@@ -281,6 +281,16 @@ async function setup(t, bindings = {}) {
   };
 }
 
+async function corruptCredentialEnvelope(mf) {
+  const storage = await mf.unsafeGetDurableObjectStorage("", "CredentialDurableObject", {
+    name: "installation",
+  });
+  await storage.exec(
+    "UPDATE credential SET envelope = ? WHERE id = 1",
+    JSON.stringify({ version: 1, nonce: Array(12).fill(0), ciphertext: Array(32).fill(0) }),
+  );
+}
+
 test("static OAuth loader: concurrent URL-only reviews share one refresh and persist no plaintext token", {
   timeout: 90_000,
 }, async (t) => {
@@ -418,27 +428,54 @@ test("wrong secret, invalid credential, replay, and public resolver are rejected
   assert.deepEqual(statuses, [401, 400, 400, 200, 409, 404]);
 });
 
-test("credential decryption failures return a safe operation error", {
+test("status classifies an undecryptable credential as requiring sign-in", {
   timeout: 60_000,
 }, async (t) => {
   const s = await setup(t);
   await signed(s.mf, "/v1/credentials/import", { provider: "openai", credential: credential() });
-
-  const storage = await s.mf.unsafeGetDurableObjectStorage("", "CredentialDurableObject", {
-    name: "installation",
-  });
-  await storage.exec(
-    "UPDATE credential SET envelope = ? WHERE id = 1",
-    JSON.stringify({ version: 1, nonce: Array(12).fill(0), ciphertext: Array(32).fill(0) }),
-  );
+  await corruptCredentialEnvelope(s.mf);
 
   const response = await signed(s.mf, "/v1/credentials/status", {});
   assert.deepEqual(
     [response.status, await response.json()],
-    [503, { status: "credential_operation_failed", errorCode: "crypto_operation_failed" }],
+    [
+      200,
+      {
+        status: "unconfigured",
+        errorCode: "crypto_operation_failed",
+        reauthRequired: true,
+      },
+    ],
   );
   assert.match(JSON.stringify(s.logs), /OperationError/);
   assert.doesNotMatch(JSON.stringify(s.logs), /fake-initial-(access|refresh)/);
+});
+
+test("bootstrap import replaces an undecryptable credential without reading it", {
+  timeout: 60_000,
+}, async (t) => {
+  const s = await setup(t);
+  const initial = await signed(s.mf, "/v1/credentials/import", {
+    provider: "openai",
+    credential: credential(),
+  });
+  await corruptCredentialEnvelope(s.mf);
+
+  const response = await signed(s.mf, "/v1/credentials/import", {
+    provider: "openai",
+    credential: {
+      ...credential(),
+      access: "fake-replacement-access",
+      refresh: "fake-replacement-refresh",
+      expires: Date.now() + 3_600_000,
+    },
+  });
+
+  assert.deepEqual(
+    [initial.status, response.status, await response.json()],
+    [200, 200, { status: "configured", reauthRequired: false }],
+  );
+  assert.doesNotMatch(JSON.stringify(s.logs), /fake-(initial|replacement)-(access|refresh)/);
 });
 
 test("unrecoverable OAuth refresh failure requires reauthentication and does not loop", {
