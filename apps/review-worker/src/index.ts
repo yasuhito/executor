@@ -29,10 +29,16 @@ import {
   type PullRequestObservation,
   type RepositoryConfig,
 } from "./github-read.ts";
-import { createReviewSchema, DurableReviewRequestStore, DurableReviewStore, type ReviewRequest } from "./store.ts";
+import {
+  createReviewSchema,
+  DurableReviewRequestStore,
+  DurableReviewStore,
+  type ReviewRequest,
+} from "./store.ts";
 
 const maxRequestBytes = 16 * 1024;
 const reviewWaitMs = 12_000;
+type CredentialAuthStatus = Awaited<ReturnType<CredentialDurableObject["checkAuth"]>>;
 const minLeaseProofRemainingMs = 8 * 60_000;
 const maxLeaseProofHorizonMs = 15 * 60_000;
 const operationIdPattern = /^[0-9a-f]{64}$/;
@@ -84,13 +90,15 @@ function configuredRepositories(env: Env): RepositoryConfig[] | null {
         typeof item.id !== "number" ||
         !Number.isSafeInteger(item.id) ||
         item.id < 1
-      ) return null;
+      )
+        return null;
       repositories.push({ fullName: item.fullName, id: item.id });
     }
     if (
       new Set(repositories.map(({ fullName }) => fullName)).size !== repositories.length ||
       new Set(repositories.map(({ id }) => id)).size !== repositories.length
-    ) return null;
+    )
+      return null;
     return repositories;
   } catch {
     return null;
@@ -108,12 +116,24 @@ function parseReviewSubmission(
     !repositories.some(({ fullName }) => fullName === parsedUrl.repository) ||
     typeof value.operationId !== "string" ||
     !operationIdPattern.test(value.operationId)
-  ) return null;
-  return { pullRequestUrl: parsedUrl.url, pullRequestNumber: parsedUrl.pullRequestNumber, operationId: value.operationId };
+  )
+    return null;
+  return {
+    pullRequestUrl: parsedUrl.url,
+    pullRequestNumber: parsedUrl.pullRequestNumber,
+    operationId: value.operationId,
+  };
 }
 
-function parseReviewId(value: unknown, includeLease: boolean): { reviewId: string; leaseExpiresAt?: number } | null {
-  if (!isRecord(value) || !hasExactKeys(value, includeLease ? ["reviewId", "leaseExpiresAt"] : ["reviewId"])) return null;
+function parseReviewId(
+  value: unknown,
+  includeLease: boolean,
+): { reviewId: string; leaseExpiresAt?: number } | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, includeLease ? ["reviewId", "leaseExpiresAt"] : ["reviewId"])
+  )
+    return null;
   if (typeof value.reviewId !== "string" || !reviewIdPattern.test(value.reviewId)) return null;
   if (includeLease) {
     if (!hasFreshLeaseProof(value.leaseExpiresAt)) return null;
@@ -123,7 +143,8 @@ function parseReviewId(value: unknown, includeLease: boolean): { reviewId: strin
 }
 
 function identityFor(request: ReviewRequest): ReviewIdentity | null {
-  if (request.headSha === null || request.baseSha === null || request.snapshotHash === null) return null;
+  if (request.headSha === null || request.baseSha === null || request.snapshotHash === null)
+    return null;
   const pullRequest = parsePullRequestUrl(request.pullRequestUrl);
   if (pullRequest === null) return null;
   return {
@@ -134,28 +155,78 @@ function identityFor(request: ReviewRequest): ReviewIdentity | null {
   };
 }
 
-async function requestResponse(request: ReviewRequest, stored: Awaited<ReturnType<DurableReviewStore["get"]>>): Promise<Response> {
+async function requestResponse(
+  request: ReviewRequest,
+  stored: Awaited<ReturnType<DurableReviewStore["get"]>>,
+): Promise<Response> {
   const identity = identityFor(request);
-  const candidate = request.headSha === null || request.baseSha === null
-    ? undefined
-    : { headSha: request.headSha, baseSha: request.baseSha };
+  const candidate =
+    request.headSha === null || request.baseSha === null
+      ? undefined
+      : { headSha: request.headSha, baseSha: request.baseSha };
   const titleHash = request.title === null ? undefined : await sha256Hex(request.title);
-  const binding = { ...(candidate === undefined ? {} : { candidate }), ...(titleHash === undefined ? {} : { titleHash }) };
-  if (request.state === "stale") return json(409, { reviewId: request.reviewId, status: "stale", ...binding, ...(identity === null ? {} : { identity }), ...(request.failureCode === null ? {} : { failureCode: request.failureCode }) });
-  if (request.state === "awaiting_ci") return json(202, { reviewId: request.reviewId, status: "awaiting_ci", ...binding });
+  const binding = {
+    ...(candidate === undefined ? {} : { candidate }),
+    ...(titleHash === undefined ? {} : { titleHash }),
+  };
+  if (request.state === "stale")
+    return json(409, {
+      reviewId: request.reviewId,
+      status: "stale",
+      ...binding,
+      ...(identity === null ? {} : { identity }),
+      ...(request.failureCode === null ? {} : { failureCode: request.failureCode }),
+    });
+  if (request.state === "awaiting_ci")
+    return json(202, { reviewId: request.reviewId, status: "awaiting_ci", ...binding });
   if (request.state === "pending") {
-    if (identity === null || request.snapshotHash === null || stored === undefined) return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
-    if (stored.state === "stale") return json(409, { reviewId: request.reviewId, identity, snapshotHash: request.snapshotHash, status: "stale" });
-    if (stored.snapshotHash !== request.snapshotHash) return json(409, { reviewId: request.reviewId, identity, status: "identity_conflict" });
-    return json(202, { reviewId: request.reviewId, identity, snapshotHash: request.snapshotHash, status: "pending", ...binding });
+    if (identity === null || request.snapshotHash === null || stored === undefined)
+      return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+    if (stored.state === "stale")
+      return json(409, {
+        reviewId: request.reviewId,
+        identity,
+        snapshotHash: request.snapshotHash,
+        status: "stale",
+      });
+    if (stored.snapshotHash !== request.snapshotHash)
+      return json(409, { reviewId: request.reviewId, identity, status: "identity_conflict" });
+    return json(202, {
+      reviewId: request.reviewId,
+      identity,
+      snapshotHash: request.snapshotHash,
+      status: "pending",
+      ...binding,
+    });
   }
   if (request.failureCode !== null) {
-    return json(200, { reviewId: request.reviewId, status: "complete", ...binding, ...(identity === null ? {} : { identity }), failureCode: request.failureCode });
+    return json(200, {
+      reviewId: request.reviewId,
+      status: "complete",
+      ...binding,
+      ...(identity === null ? {} : { identity }),
+      failureCode: request.failureCode,
+    });
   }
-  if (identity === null || request.snapshotHash === null || stored === undefined) return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
-  if (stored.state === "stale") return json(409, { reviewId: request.reviewId, identity, snapshotHash: request.snapshotHash, status: "stale" });
-  if (stored.snapshotHash !== request.snapshotHash) return json(409, { reviewId: request.reviewId, identity, status: "identity_conflict" });
-  if (stored.state === "pending") return json(202, { reviewId: request.reviewId, identity, snapshotHash: request.snapshotHash, status: "pending", ...binding });
+  if (identity === null || request.snapshotHash === null || stored === undefined)
+    return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+  if (stored.state === "stale")
+    return json(409, {
+      reviewId: request.reviewId,
+      identity,
+      snapshotHash: request.snapshotHash,
+      status: "stale",
+    });
+  if (stored.snapshotHash !== request.snapshotHash)
+    return json(409, { reviewId: request.reviewId, identity, status: "identity_conflict" });
+  if (stored.state === "pending")
+    return json(202, {
+      reviewId: request.reviewId,
+      identity,
+      snapshotHash: request.snapshotHash,
+      status: "pending",
+      ...binding,
+    });
   return json(200, {
     reviewId: request.reviewId,
     identity,
@@ -167,13 +238,21 @@ async function requestResponse(request: ReviewRequest, stored: Awaited<ReturnTyp
   });
 }
 
-function validateDependabotPullRequest(pullRequest: PullRequestObservation, repository: RepositoryConfig): string | null {
+function validateDependabotPullRequest(
+  pullRequest: PullRequestObservation,
+  repository: RepositoryConfig,
+): string | null {
   if (
     pullRequest.repository !== repository.fullName ||
     pullRequest.headRepository !== repository.fullName ||
     pullRequest.baseRepository !== repository.fullName
-  ) return "pull_request_outside_repository";
-  if (pullRequest.state !== "open" || pullRequest.authorLogin !== "dependabot[bot]" || pullRequest.authorType !== "Bot") {
+  )
+    return "pull_request_outside_repository";
+  if (
+    pullRequest.state !== "open" ||
+    pullRequest.authorLogin !== "dependabot[bot]" ||
+    pullRequest.authorType !== "Bot"
+  ) {
     return "not_open_dependabot_pull_request";
   }
   if (pullRequest.baseRef !== pullRequest.defaultBranch) return "not_default_branch_target";
@@ -181,7 +260,11 @@ function validateDependabotPullRequest(pullRequest: PullRequestObservation, repo
 }
 
 function sameCandidate(request: ReviewRequest, pullRequest: PullRequestObservation): boolean {
-  return request.headSha === pullRequest.headSha && request.baseSha === pullRequest.baseSha && request.title === pullRequest.title;
+  return (
+    request.headSha === pullRequest.headSha &&
+    request.baseSha === pullRequest.baseSha &&
+    request.title === pullRequest.title
+  );
 }
 
 export class ReviewDurableObject extends DurableObject<Env> {
@@ -189,9 +272,9 @@ export class ReviewDurableObject extends DurableObject<Env> {
   private readonly database: DurableObjectSqliteDatabase;
   private readonly ready: Promise<void>;
   private tail: Promise<void> = Promise.resolve();
-  private readonly models = reviewModels(() => this.env.CREDENTIALS.get(
-    this.env.CREDENTIALS.idFromName(credentialOwnerName),
-  ).resolveAuth());
+  private readonly models = reviewModels(() =>
+    this.env.CREDENTIALS.get(this.env.CREDENTIALS.idFromName(credentialOwnerName)).resolveAuth(),
+  );
   private readonly model = this.env.OPENAI_MODEL
     ? this.models.getModel("openai", this.env.OPENAI_MODEL)
     : undefined;
@@ -232,7 +315,10 @@ export class ReviewDurableObject extends DurableObject<Env> {
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.tail.then(operation);
-    this.tail = result.then(() => undefined, () => undefined);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
 
@@ -253,7 +339,8 @@ export class ReviewDurableObject extends DurableObject<Env> {
     const store = new DurableReviewStore(this.database);
     const requests = new DurableReviewRequestStore(this.database);
     const nonce = request.headers.get("x-executor-nonce");
-    if (nonce === null || !(await store.acceptNonce(nonce, Date.now()))) return json(409, { status: "replayed_request" });
+    if (nonce === null || !(await store.acceptNonce(nonce, Date.now())))
+      return json(409, { status: "replayed_request" });
 
     if (path === "/internal/review") {
       const submission = parseReviewSubmission(value, this.repositories);
@@ -268,8 +355,10 @@ export class ReviewDurableObject extends DurableObject<Env> {
       if (reserved === "conflict") return json(409, { reviewId, status: "identity_conflict" });
       const saved = await requests.get(reviewId);
       if (saved === undefined) return json(503, { reviewId, status: "service_unavailable" });
-      if (saved.pullRequestUrl !== submission.pullRequestUrl) return json(409, { reviewId, status: "identity_conflict" });
-      if (saved.state === "stale" || saved.state === "complete" && saved.snapshotHash === null) return requestResponse(saved, await this.getStoredReview(saved, store));
+      if (saved.pullRequestUrl !== submission.pullRequestUrl)
+        return json(409, { reviewId, status: "identity_conflict" });
+      if (saved.state === "stale" || (saved.state === "complete" && saved.snapshotHash === null))
+        return requestResponse(saved, await this.getStoredReview(saved, store));
       return this.advanceReview(saved, requests, store, request.signal);
     }
 
@@ -278,20 +367,28 @@ export class ReviewDurableObject extends DurableObject<Env> {
       if (parsed === null) return json(400, { status: "invalid_review_id" });
       const saved = await requests.get(parsed.reviewId);
       if (saved === undefined) return json(404, { reviewId: parsed.reviewId, status: "not_found" });
-      if (saved.state === "stale" || saved.state === "complete" && saved.snapshotHash === null) return requestResponse(saved, await this.getStoredReview(saved, store));
+      if (saved.state === "stale" || (saved.state === "complete" && saved.snapshotHash === null))
+        return requestResponse(saved, await this.getStoredReview(saved, store));
       return this.advanceReview(saved, requests, store, request.signal);
     }
 
     if (path === "/internal/invalidate") {
       const parsed = parseReviewId(value, true);
-      if (parsed === null || parsed.leaseExpiresAt === undefined) return json(409, { status: "invalid_lease_proof" });
+      if (parsed === null || parsed.leaseExpiresAt === undefined)
+        return json(409, { status: "invalid_lease_proof" });
       const saved = await requests.get(parsed.reviewId);
       if (saved === undefined) return json(404, { reviewId: parsed.reviewId, status: "not_found" });
       const identity = identityFor(saved);
-      if (identity !== null && saved.snapshotHash !== null) await store.invalidate(identity, saved.snapshotHash);
-      await requests.update(parsed.reviewId, { state: "stale", failureCode: "invalidated_by_executor" });
+      if (identity !== null && saved.snapshotHash !== null)
+        await store.invalidate(identity, saved.snapshotHash);
+      await requests.update(parsed.reviewId, {
+        state: "stale",
+        failureCode: "invalidated_by_executor",
+      });
       const stale = await requests.get(parsed.reviewId);
-      return stale === undefined ? json(503, { reviewId: parsed.reviewId, status: "service_unavailable" }) : requestResponse(stale, await this.getStoredReview(stale, store));
+      return stale === undefined
+        ? json(503, { reviewId: parsed.reviewId, status: "service_unavailable" })
+        : requestResponse(stale, await this.getStoredReview(stale, store));
     }
     return json(404, { status: "not_found" });
   }
@@ -309,10 +406,13 @@ export class ReviewDurableObject extends DurableObject<Env> {
     failureCode: string,
   ): Promise<Response> {
     const identity = identityFor(request);
-    if (identity !== null && request.snapshotHash !== null) await store.invalidate(identity, request.snapshotHash);
+    if (identity !== null && request.snapshotHash !== null)
+      await store.invalidate(identity, request.snapshotHash);
     await requests.update(request.reviewId, { state: "stale", failureCode });
     const stale = await requests.get(request.reviewId);
-    return stale === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(stale, await this.getStoredReview(stale, store));
+    return stale === undefined
+      ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+      : requestResponse(stale, await this.getStoredReview(stale, store));
   }
 
   private async advanceReview(
@@ -322,10 +422,12 @@ export class ReviewDurableObject extends DurableObject<Env> {
     signal: AbortSignal,
   ): Promise<Response> {
     const parsedUrl = parsePullRequestUrl(request.pullRequestUrl);
-    const repository = parsedUrl === null
-      ? undefined
-      : this.repositories.find(({ fullName }) => fullName === parsedUrl.repository);
-    if (repository === undefined) return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+    const repository =
+      parsedUrl === null
+        ? undefined
+        : this.repositories.find(({ fullName }) => fullName === parsedUrl.repository);
+    if (repository === undefined)
+      return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     const github: GitHubReadContext = {
       repository,
       fetch: (input, init) => fetch(input, init),
@@ -336,95 +438,166 @@ export class ReviewDurableObject extends DurableObject<Env> {
       pullRequest = await readPullRequest(github, request.pullRequestNumber);
     } catch (error) {
       if (error instanceof GitHubRateLimitError) {
-        return json(202, { reviewId: request.reviewId, status: "waiting_for_github", retryAfterMs: error.retryAfterMs });
+        return json(202, {
+          reviewId: request.reviewId,
+          status: "waiting_for_github",
+          retryAfterMs: error.retryAfterMs,
+        });
       }
-      return json(503, { reviewId: request.reviewId, status: "waiting_for_github", retryAfterMs: 60_000 });
+      return json(503, {
+        reviewId: request.reviewId,
+        status: "waiting_for_github",
+        retryAfterMs: 60_000,
+      });
     }
     const validationFailure = validateDependabotPullRequest(pullRequest, repository);
     if (validationFailure !== null) {
-      await requests.update(request.reviewId, { state: "complete", failureCode: validationFailure });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: validationFailure,
+      });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
     if (request.headSha === null) {
-      if (!(await requests.bindCandidate(request.reviewId, {
-        headSha: pullRequest.headSha,
-        baseSha: pullRequest.baseSha,
-        title: pullRequest.title,
-      }))) return this.markStale(request, requests, store, "pull_request_changed");
+      if (
+        !(await requests.bindCandidate(request.reviewId, {
+          headSha: pullRequest.headSha,
+          baseSha: pullRequest.baseSha,
+          title: pullRequest.title,
+        }))
+      )
+        return this.markStale(request, requests, store, "pull_request_changed");
       request = (await requests.get(request.reviewId)) ?? request;
     } else if (!sameCandidate(request, pullRequest)) {
       return this.markStale(request, requests, store, "pull_request_changed");
     }
 
     if (request.state === "pending") return this.resumeReview(request, requests, store);
-    if (request.state === "complete") return requestResponse(request, await this.getStoredReview(request, store));
-    let ci;
+    if (request.state === "complete")
+      return requestResponse(request, await this.getStoredReview(request, store));
+    let ci: Awaited<ReturnType<typeof readRequiredCi>>;
     try {
       ci = await readRequiredCi(github, pullRequest);
     } catch (error) {
       if (error instanceof GitHubRateLimitError) {
-        return json(202, { reviewId: request.reviewId, status: "waiting_for_github", candidate: { headSha: request.headSha, baseSha: request.baseSha }, retryAfterMs: error.retryAfterMs });
+        return json(202, {
+          reviewId: request.reviewId,
+          status: "waiting_for_github",
+          candidate: { headSha: request.headSha, baseSha: request.baseSha },
+          retryAfterMs: error.retryAfterMs,
+        });
       }
-      return json(503, { reviewId: request.reviewId, status: "waiting_for_github", retryAfterMs: 60_000 });
+      return json(503, {
+        reviewId: request.reviewId,
+        status: "waiting_for_github",
+        retryAfterMs: 60_000,
+      });
     }
     if (ci.kind === "pending") {
-      return json(202, { reviewId: request.reviewId, status: "awaiting_ci", candidate: { headSha: request.headSha, baseSha: request.baseSha } });
+      return json(202, {
+        reviewId: request.reviewId,
+        status: "awaiting_ci",
+        candidate: { headSha: request.headSha, baseSha: request.baseSha },
+      });
     }
     if (ci.kind !== "passed") {
       const failureCode = ci.kind === "failed" ? "ci_failed" : "ci_unproven";
       await requests.update(request.reviewId, { state: "complete", failureCode });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
 
     if (ci.testedHeadSha !== pullRequest.headSha || ci.testedBaseSha !== pullRequest.baseSha) {
-      await requests.update(request.reviewId, { state: "complete", failureCode: "ci_identity_mismatch" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "ci_identity_mismatch",
+      });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
-    let snapshot;
+    let snapshot: Awaited<ReturnType<typeof createReviewSnapshot>>;
     try {
       snapshot = await createReviewSnapshot(github, pullRequest, ci);
     } catch (error) {
       if (error instanceof GitHubRateLimitError) {
-        return json(202, { reviewId: request.reviewId, status: "waiting_for_github", candidate: { headSha: request.headSha, baseSha: request.baseSha }, retryAfterMs: error.retryAfterMs });
+        return json(202, {
+          reviewId: request.reviewId,
+          status: "waiting_for_github",
+          candidate: { headSha: request.headSha, baseSha: request.baseSha },
+          retryAfterMs: error.retryAfterMs,
+        });
       }
       snapshot = null;
     }
     if (snapshot === null) {
-      await requests.update(request.reviewId, { state: "complete", failureCode: "snapshot_unavailable" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "snapshot_unavailable",
+      });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
 
     let current: PullRequestObservation;
     try {
       current = await readPullRequest(github, request.pullRequestNumber);
     } catch (error) {
-      if (error instanceof GitHubRateLimitError) return json(202, { reviewId: request.reviewId, status: "waiting_for_github", retryAfterMs: error.retryAfterMs });
-      return json(503, { reviewId: request.reviewId, status: "waiting_for_github", retryAfterMs: 60_000 });
+      if (error instanceof GitHubRateLimitError)
+        return json(202, {
+          reviewId: request.reviewId,
+          status: "waiting_for_github",
+          retryAfterMs: error.retryAfterMs,
+        });
+      return json(503, {
+        reviewId: request.reviewId,
+        status: "waiting_for_github",
+        retryAfterMs: 60_000,
+      });
     }
-    if (!sameCandidate(request, current)) return this.markStale(request, requests, store, "pull_request_changed_before_review");
-    if (validateDependabotPullRequest(current, repository) !== null) return this.markStale(request, requests, store, "pull_request_no_longer_reviewable");
+    if (!sameCandidate(request, current))
+      return this.markStale(request, requests, store, "pull_request_changed_before_review");
+    if (validateDependabotPullRequest(current, repository) !== null)
+      return this.markStale(request, requests, store, "pull_request_no_longer_reviewable");
 
     if (this.model === undefined) {
-      await requests.update(request.reviewId, { state: "complete", failureCode: "model_unavailable" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "model_unavailable",
+      });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
-    let authStatus;
+    let authStatus: CredentialAuthStatus;
     try {
-      authStatus = await this.env.CREDENTIALS.get(this.env.CREDENTIALS.idFromName(credentialOwnerName)).checkAuth();
+      authStatus = await this.env.CREDENTIALS.get(
+        this.env.CREDENTIALS.idFromName(credentialOwnerName),
+      ).checkAuth();
     } catch {
       return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     }
     if (authStatus === "reauth_required") {
-      await requests.update(request.reviewId, { state: "complete", failureCode: "reauth_required" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "reauth_required",
+      });
       const completed = await requests.get(request.reviewId);
-      return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
+      return completed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(completed, undefined);
     }
-    if (authStatus !== "ready") return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+    if (authStatus !== "ready")
+      return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
 
     const snapshotHash = await sha256Hex(canonicalSnapshot(snapshot));
     try {
@@ -434,19 +607,24 @@ export class ReviewDurableObject extends DurableObject<Env> {
         store,
         {
           submit: (prompt, options) => this.harness.submit(prompt, options),
-          wait: (operationId, abortSignal) => this.harness.wait(operationId, { signal: abortSignal }),
+          wait: (operationId, abortSignal) =>
+            this.harness.wait(operationId, { signal: abortSignal }),
         },
         { waitMs: reviewWaitMs },
       );
       await requests.update(request.reviewId, {
-        state: stored.state === "pending" ? "pending" : stored.state === "stale" ? "stale" : "complete",
+        state:
+          stored.state === "pending" ? "pending" : stored.state === "stale" ? "stale" : "complete",
         snapshotHash,
         failureCode: stored.failureCode ?? null,
       });
       const saved = await requests.get(request.reviewId);
-      return saved === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(saved, stored);
+      return saved === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(saved, stored);
     } catch (error) {
-      if (error instanceof ReviewConflictError) return json(409, { reviewId: request.reviewId, status: "identity_conflict" });
+      if (error instanceof ReviewConflictError)
+        return json(409, { reviewId: request.reviewId, status: "identity_conflict" });
       return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     }
   }
@@ -457,26 +635,40 @@ export class ReviewDurableObject extends DurableObject<Env> {
     store: DurableReviewStore,
   ): Promise<Response> {
     const identity = identityFor(request);
-    if (identity === null || request.snapshotHash === null) return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+    if (identity === null || request.snapshotHash === null)
+      return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     if (this.model === undefined) {
       await store.fail(identity, request.snapshotHash, "model_unavailable");
-      await requests.update(request.reviewId, { state: "complete", failureCode: "model_unavailable" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "model_unavailable",
+      });
       const failed = await requests.get(request.reviewId);
-      return failed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(failed, await store.get(identity));
+      return failed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(failed, await store.get(identity));
     }
-    let authStatus;
+    let authStatus: CredentialAuthStatus;
     try {
-      authStatus = await this.env.CREDENTIALS.get(this.env.CREDENTIALS.idFromName(credentialOwnerName)).checkAuth();
+      authStatus = await this.env.CREDENTIALS.get(
+        this.env.CREDENTIALS.idFromName(credentialOwnerName),
+      ).checkAuth();
     } catch {
       return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     }
     if (authStatus === "reauth_required") {
       await store.fail(identity, request.snapshotHash, "reauth_required");
-      await requests.update(request.reviewId, { state: "complete", failureCode: "reauth_required" });
+      await requests.update(request.reviewId, {
+        state: "complete",
+        failureCode: "reauth_required",
+      });
       const failed = await requests.get(request.reviewId);
-      return failed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(failed, await store.get(identity));
+      return failed === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(failed, await store.get(identity));
     }
-    if (authStatus !== "ready") return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+    if (authStatus !== "ready")
+      return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     try {
       const stored = await resumeDurableReview(
         identity,
@@ -488,14 +680,18 @@ export class ReviewDurableObject extends DurableObject<Env> {
         },
         { waitMs: reviewWaitMs },
       );
-      if (stored === undefined) return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
+      if (stored === undefined)
+        return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
       await requests.update(request.reviewId, {
-        state: stored.state === "pending" ? "pending" : stored.state === "stale" ? "stale" : "complete",
+        state:
+          stored.state === "pending" ? "pending" : stored.state === "stale" ? "stale" : "complete",
         snapshotHash: request.snapshotHash,
         failureCode: stored.failureCode ?? null,
       });
       const saved = await requests.get(request.reviewId);
-      return saved === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(saved, stored);
+      return saved === undefined
+        ? json(503, { reviewId: request.reviewId, status: "service_unavailable" })
+        : requestResponse(saved, stored);
     } catch {
       return json(503, { reviewId: request.reviewId, status: "service_unavailable" });
     }
@@ -506,14 +702,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function authenticatedRequest(request: Request, env: Env): Promise<{ path: string; body: Uint8Array; nonce: string } | Response> {
+async function authenticatedRequest(
+  request: Request,
+  env: Env,
+): Promise<{ path: string; body: Uint8Array; nonce: string } | Response> {
   if (request.method !== "POST") return json(405, { status: "method_not_allowed" });
   const path = new URL(request.url).pathname;
-  if (!["/v1/review", "/v1/status", "/v1/invalidate"].includes(path)) return json(404, { status: "not_found" });
+  if (!["/v1/review", "/v1/status", "/v1/invalidate"].includes(path))
+    return json(404, { status: "not_found" });
   const body = await readBoundedBody(request, maxRequestBytes);
   if (body === null) return json(413, { status: "request_too_large" });
   const nonce = request.headers.get("x-executor-nonce");
-  if (nonce === null || !(await verifyRequest(env.REVIEW_HMAC_SECRET, request, body))) return json(401, { status: "unauthorized" });
+  if (nonce === null || !(await verifyRequest(env.REVIEW_HMAC_SECRET, request, body)))
+    return json(401, { status: "unauthorized" });
   return { path, body, nonce };
 }
 
@@ -538,9 +739,16 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path.startsWith("/v1/credentials/")) {
-      if (!["/v1/credentials/import", "/v1/credentials/revoke", "/v1/credentials/status"].includes(path)) return json(404, { status: "not_found" });
+      if (
+        !["/v1/credentials/import", "/v1/credentials/revoke", "/v1/credentials/status"].includes(
+          path,
+        )
+      )
+        return json(404, { status: "not_found" });
       try {
-        return await env.CREDENTIALS.get(env.CREDENTIALS.idFromName(credentialOwnerName)).fetch(request);
+        return await env.CREDENTIALS.get(env.CREDENTIALS.idFromName(credentialOwnerName)).fetch(
+          request,
+        );
       } catch {
         return json(503, { status: "credentials_unavailable" });
       }
@@ -568,7 +776,12 @@ export default {
       if (authenticated.path === "/v1/review") {
         const submission = parseReviewSubmission(value, repositories);
         if (submission === null) return json(400, { status: "invalid_review_request" });
-        body = new TextEncoder().encode(JSON.stringify({ pullRequestUrl: submission.pullRequestUrl, operationId: submission.operationId }));
+        body = new TextEncoder().encode(
+          JSON.stringify({
+            pullRequestUrl: submission.pullRequestUrl,
+            operationId: submission.operationId,
+          }),
+        );
       }
       return await stub.fetch(`https://review.internal${internalPath}`, {
         method: "POST",

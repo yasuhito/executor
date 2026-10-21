@@ -21,7 +21,10 @@ export function repositoryPath(repository: Pick<RepositoryConfig, "fullName">): 
   return `/repos/${repository.fullName}`;
 }
 
-export function pullRequestUrl(repository: Pick<RepositoryConfig, "fullName">, number: number): string {
+export function pullRequestUrl(
+  repository: Pick<RepositoryConfig, "fullName">,
+  number: number,
+): string {
   return `https://github.com/${repository.fullName}/pull/${number}`;
 }
 
@@ -35,10 +38,13 @@ export function repositoryFromAllowlist(
     typeof candidate.id !== "number" ||
     !Number.isSafeInteger(candidate.id) ||
     typeof candidate.full_name !== "string"
-  ) return null;
-  return repositories.find(
-    ({ id, fullName }) => id === candidate.id && fullName === candidate.full_name,
-  ) ?? null;
+  )
+    return null;
+  return (
+    repositories.find(
+      ({ id, fullName }) => id === candidate.id && fullName === candidate.full_name,
+    ) ?? null
+  );
 }
 
 export function hasValidRepositoryAllowlist(repositories: readonly RepositoryConfig[]): boolean {

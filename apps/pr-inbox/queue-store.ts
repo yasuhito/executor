@@ -31,11 +31,17 @@ export interface ClaimInput {
 
 export function claimNext(sql: Sql, input: ClaimInput): QueueClaim {
   return sql.transaction((transaction) => {
-    const existing = transaction.exec<LockRow>(
-      "SELECT run_id, lease_until, fencing, job_delivery_id FROM repository_locks WHERE repository = ?",
-      input.repository,
-    ).toArray()[0];
-    if (existing !== undefined && existing.run_id !== input.runId && existing.lease_until > input.now) {
+    const existing = transaction
+      .exec<LockRow>(
+        "SELECT run_id, lease_until, fencing, job_delivery_id FROM repository_locks WHERE repository = ?",
+        input.repository,
+      )
+      .toArray()[0];
+    if (
+      existing !== undefined &&
+      existing.run_id !== input.runId &&
+      existing.lease_until > input.now
+    ) {
       return { kind: "busy", retryAfterMs: existing.lease_until - input.now };
     }
 
@@ -77,13 +83,15 @@ export function claimNext(sql: Sql, input: ClaimInput): QueueClaim {
     );
 
     if (existing?.run_id === input.runId && existing.job_delivery_id !== null) {
-      const current = transaction.exec<QueueItem>(
-        `SELECT delivery_id, repository, pull_request_number, event_head_sha, event_base_sha, attempts
+      const current = transaction
+        .exec<QueueItem>(
+          `SELECT delivery_id, repository, pull_request_number, event_head_sha, event_base_sha, attempts
          FROM review_queue WHERE delivery_id = ? AND state = 'processing' AND run_id = ? AND fencing = ?`,
-        existing.job_delivery_id,
-        input.runId,
-        fencing,
-      ).toArray()[0];
+          existing.job_delivery_id,
+          input.runId,
+          fencing,
+        )
+        .toArray()[0];
       if (current !== undefined) {
         transaction.exec(
           "UPDATE repository_locks SET job_delivery_id = ? WHERE repository = ? AND run_id = ? AND fencing = ?",
@@ -104,12 +112,14 @@ export function claimNext(sql: Sql, input: ClaimInput): QueueClaim {
       }
     }
 
-    const item = transaction.exec<QueueItem>(
-      `SELECT delivery_id, repository, pull_request_number, event_head_sha, event_base_sha, attempts
+    const item = transaction
+      .exec<QueueItem>(
+        `SELECT delivery_id, repository, pull_request_number, event_head_sha, event_base_sha, attempts
        FROM review_queue WHERE repository = ? AND state = 'queued'
        ORDER BY received_at ASC, delivery_id ASC LIMIT 1`,
-      input.repository,
-    ).toArray()[0];
+        input.repository,
+      )
+      .toArray()[0];
     if (item === undefined) {
       transaction.exec(
         "UPDATE repository_locks SET lease_until = ?, job_delivery_id = NULL WHERE repository = ? AND run_id = ? AND fencing = ?",
@@ -141,24 +151,32 @@ export function claimNext(sql: Sql, input: ClaimInput): QueueClaim {
   });
 }
 
-export function releaseRepositoryLock(sql: Sql, input: { repository: string; runId: string; fencing: number; now: number }): boolean {
-  return sql.exec(
-    `UPDATE repository_locks SET lease_until = ?, job_delivery_id = NULL
+export function releaseRepositoryLock(
+  sql: Sql,
+  input: { repository: string; runId: string; fencing: number; now: number },
+): boolean {
+  return (
+    sql.exec(
+      `UPDATE repository_locks SET lease_until = ?, job_delivery_id = NULL
      WHERE repository = ? AND run_id = ? AND fencing = ? AND job_delivery_id IS NULL`,
-    input.now,
-    input.repository,
-    input.runId,
-    input.fencing,
-  ).rowsWritten === 1;
+      input.now,
+      input.repository,
+      input.runId,
+      input.fencing,
+    ).rowsWritten === 1
+  );
 }
 
-export function renewQueueLease(sql: Sql, input: {
-  repository: string;
-  runId: string;
-  fencing: number;
-  leaseMs: number;
-  now: number;
-}): number | null {
+export function renewQueueLease(
+  sql: Sql,
+  input: {
+    repository: string;
+    runId: string;
+    fencing: number;
+    leaseMs: number;
+    now: number;
+  },
+): number | null {
   return sql.transaction((transaction) => {
     const leaseUntil = input.now + input.leaseMs;
     const lock = transaction.exec(
@@ -198,13 +216,15 @@ export interface QueueCompletion {
 }
 
 function finishInTransaction(transaction: SqlReader, input: QueueCompletion): boolean {
-  const lock = transaction.exec(
-    `SELECT run_id FROM repository_locks WHERE repository = ? AND run_id = ? AND fencing = ? AND job_delivery_id = ?`,
-    input.repository,
-    input.runId,
-    input.fencing,
-    input.deliveryId,
-  ).toArray()[0];
+  const lock = transaction
+    .exec(
+      `SELECT run_id FROM repository_locks WHERE repository = ? AND run_id = ? AND fencing = ? AND job_delivery_id = ?`,
+      input.repository,
+      input.runId,
+      input.fencing,
+      input.deliveryId,
+    )
+    .toArray()[0];
   if (lock === undefined) return false;
   const updated = transaction.exec(
     `UPDATE review_queue SET state = ?, run_id = NULL, fencing = NULL, lease_until = NULL,
@@ -268,14 +288,22 @@ export function finishQueueItemWithNotifications(
 }
 
 export function pendingWorkExists(sql: SqlReader, repository: string, now = Date.now()): boolean {
-  const queue = sql.exec(
-    "SELECT delivery_id FROM review_queue WHERE repository = ? AND state IN ('queued', 'processing') LIMIT 1",
-    repository,
-  ).toArray();
-  return queue.length > 0 || sql.exec(
-    "SELECT notification_id FROM notification_outbox WHERE repository = ? AND (status = 'sending' OR (status = 'queued' AND next_attempt_at <= ?)) LIMIT 1",
-    repository, now,
-  ).toArray().length > 0;
+  const queue = sql
+    .exec(
+      "SELECT delivery_id FROM review_queue WHERE repository = ? AND state IN ('queued', 'processing') LIMIT 1",
+      repository,
+    )
+    .toArray();
+  return (
+    queue.length > 0 ||
+    sql
+      .exec(
+        "SELECT notification_id FROM notification_outbox WHERE repository = ? AND (status = 'sending' OR (status = 'queued' AND next_attempt_at <= ?)) LIMIT 1",
+        repository,
+        now,
+      )
+      .toArray().length > 0
+  );
 }
 
 export interface NotificationInput {
@@ -291,23 +319,25 @@ export interface NotificationInput {
 }
 
 export function enqueueNotification(sql: Sql, input: NotificationInput): boolean {
-  return sql.exec(
-    `INSERT OR IGNORE INTO notification_outbox
+  return (
+    sql.exec(
+      `INSERT OR IGNORE INTO notification_outbox
       (notification_id, dedupe_key, repository, pull_request_number, head_sha, tested_base_sha,
        kind, message, status, failure_code, created_at, updated_at, next_attempt_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?)`,
-    input.notificationId,
-    input.dedupeKey,
-    input.repository,
-    input.pullRequestNumber,
-    input.headSha,
-    input.testedBaseSha,
-    input.kind,
-    input.message,
-    input.now,
-    input.now,
-    input.now,
-  ).rowsWritten > 0;
+      input.notificationId,
+      input.dedupeKey,
+      input.repository,
+      input.pullRequestNumber,
+      input.headSha,
+      input.testedBaseSha,
+      input.kind,
+      input.message,
+      input.now,
+      input.now,
+      input.now,
+    ).rowsWritten > 0
+  );
 }
 
 export interface NotificationRow extends SqlRow {
@@ -335,11 +365,18 @@ interface NotificationLockInput {
 }
 
 function ownsNotificationLock(sql: SqlReader, input: NotificationLockInput): boolean {
-  return sql.exec(
-    `SELECT run_id FROM repository_locks
+  return (
+    sql
+      .exec(
+        `SELECT run_id FROM repository_locks
      WHERE repository = ? AND run_id = ? AND fencing = ? AND lease_until > ? AND job_delivery_id IS NULL`,
-    input.repository, input.runId, input.fencing, input.now,
-  ).toArray().length === 1;
+        input.repository,
+        input.runId,
+        input.fencing,
+        input.now,
+      )
+      .toArray().length === 1
+  );
 }
 
 export function markSendingNotificationsUnknown(sql: Sql, input: NotificationLockInput): number {
@@ -348,44 +385,65 @@ export function markSendingNotificationsUnknown(sql: Sql, input: NotificationLoc
     return transaction.exec(
       `UPDATE notification_outbox SET status = 'unknown', failure_code = 'telegram_delivery_unknown', updated_at = ?
        WHERE repository = ? AND status = 'sending'`,
-      input.now, input.repository,
+      input.now,
+      input.repository,
     ).rowsWritten;
   });
 }
 
-export function claimNextNotification(sql: Sql, input: NotificationLockInput): NotificationRow | null {
+export function claimNextNotification(
+  sql: Sql,
+  input: NotificationLockInput,
+): NotificationRow | null {
   return sql.transaction((transaction) => {
     if (!ownsNotificationLock(transaction, input)) return null;
-    const row = transaction.exec<NotificationRow>(
-      `SELECT * FROM notification_outbox WHERE repository = ? AND status = 'queued' AND next_attempt_at <= ?
-       ORDER BY created_at, notification_id LIMIT 1`, input.repository, input.now,
-    ).toArray()[0];
+    const row = transaction
+      .exec<NotificationRow>(
+        `SELECT * FROM notification_outbox WHERE repository = ? AND status = 'queued' AND next_attempt_at <= ?
+       ORDER BY created_at, notification_id LIMIT 1`,
+        input.repository,
+        input.now,
+      )
+      .toArray()[0];
     if (row === undefined) return null;
     transaction.exec(
       `UPDATE notification_outbox SET status = 'sending', attempts = attempts + 1, send_run_id = ?, send_fencing = ?, updated_at = ?
        WHERE notification_id = ? AND status = 'queued'`,
-      input.runId, input.fencing, input.now, row.notification_id,
+      input.runId,
+      input.fencing,
+      input.now,
+      row.notification_id,
     );
     return { ...row, status: "sending", attempts: row.attempts + 1 };
   });
 }
 
-export function recordTelegramNotification(sql: Sql, input: NotificationLockInput & {
-  notificationId: string;
-  outcome: TelegramOutcome;
-}): boolean {
+export function recordTelegramNotification(
+  sql: Sql,
+  input: NotificationLockInput & {
+    notificationId: string;
+    outcome: TelegramOutcome;
+  },
+): boolean {
   return sql.transaction((transaction) => {
     if (!ownsNotificationLock(transaction, input)) return false;
     const retry = input.outcome.status === "retry";
     const delay = input.outcome.status === "retry" ? input.outcome.retryAfterMs : 0;
     // Never turn an ambiguous delivery into a retry, or shorten Telegram's delay.
     if (retry && (!Number.isSafeInteger(delay) || delay < 1000 || delay > 3600000)) return false;
-    return transaction.exec(
-      `UPDATE notification_outbox SET status = ?, failure_code = ?, next_attempt_at = ?, updated_at = ?
+    return (
+      transaction.exec(
+        `UPDATE notification_outbox SET status = ?, failure_code = ?, next_attempt_at = ?, updated_at = ?
        WHERE notification_id = ? AND repository = ? AND status = 'sending' AND send_run_id = ? AND send_fencing = ?`,
-      retry ? "queued" : input.outcome.status,
-      input.outcome.status === "sent" ? null : input.outcome.failureCode,
-      input.now + delay, input.now, input.notificationId, input.repository, input.runId, input.fencing,
-    ).rowsWritten === 1;
+        retry ? "queued" : input.outcome.status,
+        input.outcome.status === "sent" ? null : input.outcome.failureCode,
+        input.now + delay,
+        input.now,
+        input.notificationId,
+        input.repository,
+        input.runId,
+        input.fencing,
+      ).rowsWritten === 1
+    );
   });
 }

@@ -1,5 +1,15 @@
-import { proveRequiredCi, type CheckRunEvidence, type CommitEvidence, type WorkflowRunEvidence } from "./ci-proof.ts";
-import { parseReviewSnapshot, type ContextFile, type ReviewFile, type ReviewSnapshot } from "./core.ts";
+import {
+  proveRequiredCi,
+  type CheckRunEvidence,
+  type CommitEvidence,
+  type WorkflowRunEvidence,
+} from "./ci-proof.ts";
+import {
+  parseReviewSnapshot,
+  type ContextFile,
+  type ReviewFile,
+  type ReviewSnapshot,
+} from "./core.ts";
 
 export const apiOrigin = "https://api.github.com";
 
@@ -63,7 +73,8 @@ export interface CanonicalPullRequestUrl {
 
 export function parsePullRequestUrl(value: unknown): CanonicalPullRequestUrl | null {
   if (typeof value !== "string") return null;
-  const match = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/.exec(value);
+  const match =
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/.exec(value);
   if (match === null) return null;
   const pullRequestNumber = Number(match[2]);
   if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) return null;
@@ -114,8 +125,12 @@ export async function githubResponse(context: GitHubReadContext, path: string): 
     if (error instanceof GitHubRateLimitError) throw error;
     throw new Error("GitHub read request failed.");
   }
-  if (response.status >= 300 && response.status < 400) throw new Error("GitHub read redirected the request.");
-  if (response.status === 429 || response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+  if (response.status >= 300 && response.status < 400)
+    throw new Error("GitHub read redirected the request.");
+  if (
+    response.status === 429 ||
+    (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0")
+  ) {
     throw new GitHubRateLimitError(retryAfterMs(response));
   }
   return response;
@@ -137,30 +152,45 @@ export async function readPullRequest(
   context: GitHubReadContext,
   pullRequestNumber: number,
 ): Promise<PullRequestObservation> {
-  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) throw new Error("Invalid pull request number.");
+  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1)
+    throw new Error("Invalid pull request number.");
   const repositoryBase = repositoryPath(context.repository);
   const [rawPullRequest, rawRepository] = await Promise.all([
     githubJson(context, `${repositoryBase}/pulls/${pullRequestNumber}`),
     githubJson(context, repositoryBase),
   ]);
-  if (!isRecord(rawPullRequest) || !isRecord(rawRepository)) throw new Error("GitHub returned an invalid pull request.");
+  if (!isRecord(rawPullRequest) || !isRecord(rawRepository))
+    throw new Error("GitHub returned an invalid pull request.");
   const user = rawPullRequest.user;
   const head = rawPullRequest.head;
   const base = rawPullRequest.base;
   if (
-    !isRecord(user) || !isRecord(head) || !isRecord(base) ||
-    !isRecord(head.repo) || !isRecord(base.repo) ||
-    typeof head.repo.id !== "number" || head.repo.id !== context.repository.id ||
-    typeof base.repo.id !== "number" || base.repo.id !== context.repository.id ||
-    rawRepository.id !== context.repository.id || rawRepository.full_name !== context.repository.fullName ||
-    typeof rawPullRequest.state !== "string" || typeof rawPullRequest.title !== "string" ||
-    typeof head.ref !== "string" || typeof base.ref !== "string" ||
-    typeof head.repo.full_name !== "string" || typeof base.repo.full_name !== "string" ||
-    !validSha(head.sha) || !validSha(base.sha) ||
-    typeof user.login !== "string" || typeof user.type !== "string" ||
+    !isRecord(user) ||
+    !isRecord(head) ||
+    !isRecord(base) ||
+    !isRecord(head.repo) ||
+    !isRecord(base.repo) ||
+    typeof head.repo.id !== "number" ||
+    head.repo.id !== context.repository.id ||
+    typeof base.repo.id !== "number" ||
+    base.repo.id !== context.repository.id ||
+    rawRepository.id !== context.repository.id ||
+    rawRepository.full_name !== context.repository.fullName ||
+    typeof rawPullRequest.state !== "string" ||
+    typeof rawPullRequest.title !== "string" ||
+    typeof head.ref !== "string" ||
+    typeof base.ref !== "string" ||
+    typeof head.repo.full_name !== "string" ||
+    typeof base.repo.full_name !== "string" ||
+    !validSha(head.sha) ||
+    !validSha(base.sha) ||
+    typeof user.login !== "string" ||
+    typeof user.type !== "string" ||
     typeof rawRepository.default_branch !== "string" ||
-    typeof rawPullRequest.number !== "number" || rawPullRequest.number !== pullRequestNumber
-  ) throw new Error("GitHub returned incomplete pull request identity evidence.");
+    typeof rawPullRequest.number !== "number" ||
+    rawPullRequest.number !== pullRequestNumber
+  )
+    throw new Error("GitHub returned incomplete pull request identity evidence.");
   return {
     repository: context.repository.fullName,
     pullRequest: pullRequestNumber,
@@ -178,30 +208,44 @@ export async function readPullRequest(
     draft: typeof rawPullRequest.draft === "boolean" ? rawPullRequest.draft : null,
     merged: typeof rawPullRequest.merged === "boolean" ? rawPullRequest.merged : null,
     mergeable: typeof rawPullRequest.mergeable === "boolean" ? rawPullRequest.mergeable : null,
-    mergeableState: typeof rawPullRequest.mergeable_state === "string" ? rawPullRequest.mergeable_state : null,
+    mergeableState:
+      typeof rawPullRequest.mergeable_state === "string" ? rawPullRequest.mergeable_state : null,
     mergedAt: typeof rawPullRequest.merged_at === "string" ? rawPullRequest.merged_at : null,
-    mergeCommitSha: validSha(rawPullRequest.merge_commit_sha) ? rawPullRequest.merge_commit_sha.toLowerCase() : null,
+    mergeCommitSha: validSha(rawPullRequest.merge_commit_sha)
+      ? rawPullRequest.merge_commit_sha.toLowerCase()
+      : null,
   };
 }
 
-export async function readCommit(context: GitHubReadContext, sha: string): Promise<CommitEvidence | null> {
+export async function readCommit(
+  context: GitHubReadContext,
+  sha: string,
+): Promise<CommitEvidence | null> {
   if (!validSha(sha)) return null;
-  const value = await githubJson(context, `${repositoryPath(context.repository)}/commits/${sha.toLowerCase()}`);
+  const value = await githubJson(
+    context,
+    `${repositoryPath(context.repository)}/commits/${sha.toLowerCase()}`,
+  );
   return parseCommit(value);
 }
 
 function parseWorkflowRun(value: unknown): WorkflowRunEvidence | null {
   if (!isRecord(value) || !Array.isArray(value.pull_requests)) return null;
   if (
-    typeof value.id !== "number" || !Number.isSafeInteger(value.id) ||
-    typeof value.event !== "string" || typeof value.status !== "string" ||
+    typeof value.id !== "number" ||
+    !Number.isSafeInteger(value.id) ||
+    typeof value.event !== "string" ||
+    typeof value.status !== "string" ||
     !(value.conclusion === null || typeof value.conclusion === "string") ||
-    !validSha(value.head_sha) || !(value.check_suite_id === null || typeof value.check_suite_id === "number") ||
+    !validSha(value.head_sha) ||
+    !(value.check_suite_id === null || typeof value.check_suite_id === "number") ||
     typeof value.created_at !== "string"
-  ) return null;
+  )
+    return null;
   const pullRequests: Array<{ number: number }> = [];
   for (const item of value.pull_requests) {
-    if (!isRecord(item) || typeof item.number !== "number" || !Number.isSafeInteger(item.number)) return null;
+    if (!isRecord(item) || typeof item.number !== "number" || !Number.isSafeInteger(item.number))
+      return null;
     pullRequests.push({ number: item.number });
   }
   return {
@@ -230,12 +274,16 @@ function parseCheckRun(value: unknown): CheckRunEvidence | null {
   if (!isRecord(value) || !isRecord(value.check_suite)) return null;
   const app = value.app;
   if (
-    typeof value.id !== "number" || !Number.isSafeInteger(value.id) ||
-    typeof value.name !== "string" || !validSha(value.head_sha) || typeof value.status !== "string" ||
+    typeof value.id !== "number" ||
+    !Number.isSafeInteger(value.id) ||
+    typeof value.name !== "string" ||
+    !validSha(value.head_sha) ||
+    typeof value.status !== "string" ||
     !(value.conclusion === null || typeof value.conclusion === "string") ||
     typeof value.check_suite.id !== "number" ||
-    !(app === null || isRecord(app) && (app.slug === null || typeof app.slug === "string"))
-  ) return null;
+    !(app === null || (isRecord(app) && (app.slug === null || typeof app.slug === "string")))
+  )
+    return null;
   return {
     id: value.id,
     name: value.name,
@@ -247,33 +295,55 @@ function parseCheckRun(value: unknown): CheckRunEvidence | null {
   };
 }
 
-export async function readRequiredCi(context: GitHubReadContext, pullRequest: PullRequestObservation) {
-  const query = new URLSearchParams({ branch: pullRequest.headRef, event: "pull_request", per_page: "100" });
+export async function readRequiredCi(
+  context: GitHubReadContext,
+  pullRequest: PullRequestObservation,
+) {
+  const query = new URLSearchParams({
+    branch: pullRequest.headRef,
+    event: "pull_request",
+    per_page: "100",
+  });
   const allRuns: WorkflowRunEvidence[] = [];
   let totalCount = 0;
   for (let page = 1; page <= maxApiPages; page += 1) {
     query.set("page", String(page));
-    const value = await githubJson(context, `${repositoryPath(context.repository)}/actions/runs?${query.toString()}`);
-    if (!isRecord(value) || !Array.isArray(value.workflow_runs) || typeof value.total_count !== "number") {
+    const value = await githubJson(
+      context,
+      `${repositoryPath(context.repository)}/actions/runs?${query.toString()}`,
+    );
+    if (
+      !isRecord(value) ||
+      !Array.isArray(value.workflow_runs) ||
+      typeof value.total_count !== "number"
+    ) {
       throw new Error("GitHub returned an invalid workflow-run list.");
     }
     totalCount = value.total_count;
     const pageRuns = value.workflow_runs.map(parseWorkflowRun);
-    if (pageRuns.some((run) => run === null)) throw new Error("GitHub returned an invalid workflow run.");
+    if (pageRuns.some((run) => run === null))
+      throw new Error("GitHub returned an invalid workflow run.");
     allRuns.push(...pageRuns.filter((run): run is WorkflowRunEvidence => run !== null));
     if (value.workflow_runs.length < 100) break;
   }
 
   const linkedRuns = allRuns
-    .filter((run) => run.event === "pull_request" && run.pullRequests.some(({ number }) => number === pullRequest.pullRequest))
+    .filter(
+      (run) =>
+        run.event === "pull_request" &&
+        run.pullRequests.some(({ number }) => number === pullRequest.pullRequest),
+    )
     .sort((left, right) => {
       const timeOrder = Date.parse(right.createdAt) - Date.parse(left.createdAt);
       return Number.isFinite(timeOrder) && timeOrder !== 0 ? timeOrder : right.id - left.id;
     });
   if (linkedRuns.length === 0) {
     return totalCount > maxApiPages * 100
-      ? { kind: "unproven", reason: "The pull request workflow run is outside the bounded GitHub API search window." } as const
-      : { kind: "pending" } as const;
+      ? ({
+          kind: "unproven",
+          reason: "The pull request workflow run is outside the bounded GitHub API search window.",
+        } as const)
+      : ({ kind: "pending" } as const);
   }
 
   let matchingRun: WorkflowRunEvidence | undefined;
@@ -296,27 +366,47 @@ export async function readRequiredCi(context: GitHubReadContext, pullRequest: Pu
     } catch (error) {
       if (error instanceof GitHubRateLimitError) throw error;
       if (run.status !== "completed") return { kind: "pending" } as const;
-      return { kind: "unproven", reason: "A completed workflow run's merge commit could not be verified." } as const;
+      return {
+        kind: "unproven",
+        reason: "A completed workflow run's merge commit could not be verified.",
+      } as const;
     }
   }
   if (matchingRun === undefined || matchingCommit === undefined) {
     return activeRunSeen
-      ? { kind: "pending" } as const
-      : { kind: "unproven", reason: "No workflow merge commit proves the current pull request head and base." } as const;
+      ? ({ kind: "pending" } as const)
+      : ({
+          kind: "unproven",
+          reason: "No workflow merge commit proves the current pull request head and base.",
+        } as const);
   }
   if (matchingRun.checkSuiteId === null) {
-    return { kind: "unproven", reason: "The candidate workflow run has no check-suite identity." } as const;
+    return {
+      kind: "unproven",
+      reason: "The candidate workflow run has no check-suite identity.",
+    } as const;
   }
 
-  const rawChecks = await githubJson(context, `${repositoryPath(context.repository)}/commits/${matchingRun.headSha}/check-runs?per_page=100`);
-  if (!isRecord(rawChecks) || !Array.isArray(rawChecks.check_runs) || typeof rawChecks.total_count !== "number") {
+  const rawChecks = await githubJson(
+    context,
+    `${repositoryPath(context.repository)}/commits/${matchingRun.headSha}/check-runs?per_page=100`,
+  );
+  if (
+    !isRecord(rawChecks) ||
+    !Array.isArray(rawChecks.check_runs) ||
+    typeof rawChecks.total_count !== "number"
+  ) {
     throw new Error("GitHub returned an invalid check-run list.");
   }
   if (rawChecks.total_count > rawChecks.check_runs.length) {
-    return { kind: "unproven", reason: "The tested check suite exceeds the bounded evidence page." } as const;
+    return {
+      kind: "unproven",
+      reason: "The tested check suite exceeds the bounded evidence page.",
+    } as const;
   }
   const checks = rawChecks.check_runs.map(parseCheckRun);
-  if (checks.some((check) => check === null)) throw new Error("GitHub returned an invalid check run.");
+  if (checks.some((check) => check === null))
+    throw new Error("GitHub returned an invalid check run.");
   const validChecks = checks.filter((check): check is CheckRunEvidence => check !== null);
   return proveRequiredCi({
     pullRequestNumber: pullRequest.pullRequest,
@@ -332,38 +422,67 @@ function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
-async function readContent(context: GitHubReadContext, path: string, ref: string): Promise<string | null> {
-  const response = await githubResponse(context, `${repositoryPath(context.repository)}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`);
+async function readContent(
+  context: GitHubReadContext,
+  path: string,
+  ref: string,
+): Promise<string | null> {
+  const response = await githubResponse(
+    context,
+    `${repositoryPath(context.repository)}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`,
+  );
   if (response.status === 404) return null;
-  if (response.status !== 200) throw new Error(`GitHub content read returned HTTP ${response.status}.`);
+  if (response.status !== 200)
+    throw new Error(`GitHub content read returned HTTP ${response.status}.`);
   let value: unknown;
   try {
     value = await response.json();
   } catch {
     throw new Error("GitHub content read returned invalid JSON.");
   }
-  if (!isRecord(value) || value.type !== "file" || value.encoding !== "base64" || typeof value.content !== "string") {
+  if (
+    !isRecord(value) ||
+    value.type !== "file" ||
+    value.encoding !== "base64" ||
+    typeof value.content !== "string"
+  ) {
     throw new Error("GitHub returned an unreadable baseline instruction file.");
   }
   try {
-    const bytes = Uint8Array.from(atob(value.content.replace(/\s/g, "")), (character) => character.charCodeAt(0));
+    const bytes = Uint8Array.from(atob(value.content.replace(/\s/g, "")), (character) =>
+      character.charCodeAt(0),
+    );
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     throw new Error("GitHub returned invalid baseline instruction content.");
   }
 }
 
-async function readReviewFiles(context: GitHubReadContext, pullRequest: PullRequestObservation): Promise<ReviewFile[] | null> {
+async function readReviewFiles(
+  context: GitHubReadContext,
+  pullRequest: PullRequestObservation,
+): Promise<ReviewFile[] | null> {
   const files: ReviewFile[] = [];
   for (let page = 1; page <= 2; page += 1) {
-    const value = await githubJson(context, `${repositoryPath(context.repository)}/pulls/${pullRequest.pullRequest}/files?per_page=100&page=${page}`);
-    if (!Array.isArray(value)) throw new Error("GitHub returned an invalid pull request file list.");
+    const value = await githubJson(
+      context,
+      `${repositoryPath(context.repository)}/pulls/${pullRequest.pullRequest}/files?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(value))
+      throw new Error("GitHub returned an invalid pull request file list.");
     if (files.length + value.length > 100) return null;
     for (const item of value) {
-      if (!isRecord(item) || typeof item.filename !== "string" || typeof item.status !== "string" || typeof item.patch !== "string") return null;
+      if (
+        !isRecord(item) ||
+        typeof item.filename !== "string" ||
+        typeof item.status !== "string" ||
+        typeof item.patch !== "string"
+      )
+        return null;
       if (!["added", "modified", "removed", "renamed", "copied"].includes(item.status)) return null;
       if (item.patch.length === 0) return null;
-      if (item.previous_filename !== undefined && typeof item.previous_filename !== "string") return null;
+      if (item.previous_filename !== undefined && typeof item.previous_filename !== "string")
+        return null;
       files.push({
         path: item.filename,
         status: item.status as ReviewFile["status"],
@@ -377,22 +496,42 @@ async function readReviewFiles(context: GitHubReadContext, pullRequest: PullRequ
   return files.length === 0 ? null : files;
 }
 
-async function readCommitMessages(context: GitHubReadContext, pullRequest: PullRequestObservation): Promise<string[] | null> {
-  const value = await githubJson(context, `${repositoryPath(context.repository)}/pulls/${pullRequest.pullRequest}/commits?per_page=100&page=1`);
+async function readCommitMessages(
+  context: GitHubReadContext,
+  pullRequest: PullRequestObservation,
+): Promise<string[] | null> {
+  const value = await githubJson(
+    context,
+    `${repositoryPath(context.repository)}/pulls/${pullRequest.pullRequest}/commits?per_page=100&page=1`,
+  );
   if (!Array.isArray(value) || value.length === 0 || value.length > 50) return null;
   const messages: string[] = [];
   for (const commit of value) {
-    if (!isRecord(commit) || !isRecord(commit.commit) || typeof commit.commit.message !== "string" || commit.commit.message.length > 2048) return null;
+    if (
+      !isRecord(commit) ||
+      !isRecord(commit.commit) ||
+      typeof commit.commit.message !== "string" ||
+      commit.commit.message.length > 2048
+    )
+      return null;
     messages.push(commit.commit.message);
   }
   return messages;
 }
 
-async function readInstructions(context: GitHubReadContext, pullRequest: PullRequestObservation, files: ReviewFile[]): Promise<ContextFile[] | null> {
+async function readInstructions(
+  context: GitHubReadContext,
+  pullRequest: PullRequestObservation,
+  files: ReviewFile[],
+): Promise<ContextFile[] | null> {
   const paths = new Set(["AGENTS.md", "CONTRIBUTING.md"]);
   for (const file of files) {
     const segments = file.path.split("/");
-    if (file.path.startsWith("/") || segments.some((segment) => segment === ".." || segment === ".")) return null;
+    if (
+      file.path.startsWith("/") ||
+      segments.some((segment) => segment === ".." || segment === ".")
+    )
+      return null;
     for (let depth = 1; depth < segments.length; depth += 1) {
       paths.add(`${segments.slice(0, depth).join("/")}/AGENTS.md`);
     }
@@ -402,7 +541,12 @@ async function readInstructions(context: GitHubReadContext, pullRequest: PullReq
   const results: ContextFile[] = [];
   for (let offset = 0; offset < candidates.length; offset += 6) {
     const batch = candidates.slice(offset, offset + 6);
-    const contents = await Promise.all(batch.map(async (path) => ({ path, content: await readContent(context, path, pullRequest.baseSha) })));
+    const contents = await Promise.all(
+      batch.map(async (path) => ({
+        path,
+        content: await readContent(context, path, pullRequest.baseSha),
+      })),
+    );
     for (const { path, content } of contents) {
       if (content !== null) results.push({ path, content });
     }
@@ -421,7 +565,8 @@ export async function createReviewSnapshot(
   if (
     proof.testedHeadSha.toLowerCase() !== pullRequest.headSha.toLowerCase() ||
     proof.testedBaseSha.toLowerCase() !== pullRequest.baseSha.toLowerCase()
-  ) return null;
+  )
+    return null;
   const [files, commitMessages] = await Promise.all([
     readReviewFiles(context, pullRequest),
     readCommitMessages(context, pullRequest),

@@ -4,7 +4,7 @@ import { signRequest, verifyRequest } from "../src/auth.ts";
 
 const secret = "local-test-shared-key-with-at-least-32-bytes";
 const path = "/v1/review";
-const body = new TextEncoder().encode("{\"identity\":\"fixture\"}");
+const body = new TextEncoder().encode('{"identity":"fixture"}');
 const timestamp = 1_800_000_000;
 const nonce = "11111111-2222-4333-8444-555555555555";
 
@@ -30,7 +30,7 @@ test("authenticates the exact method, path, body, timestamp, and nonce", async (
 
 test("rejects a body altered after its signature was made", async () => {
   const request = await signedRequest();
-  const altered = new TextEncoder().encode("{\"identity\":\"changed\"}");
+  const altered = new TextEncoder().encode('{"identity":"changed"}');
   const valid = await verifyRequest(secret, request, altered, timestamp);
 
   assert.equal(valid, false);
