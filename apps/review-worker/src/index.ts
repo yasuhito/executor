@@ -33,6 +33,7 @@ import { createReviewSchema, DurableReviewRequestStore, DurableReviewStore, type
 
 const maxRequestBytes = 16 * 1024;
 const reviewWaitMs = 12_000;
+type CredentialAuthStatus = Awaited<ReturnType<CredentialDurableObject["checkAuth"]>>;
 const minLeaseProofRemainingMs = 8 * 60_000;
 const maxLeaseProofHorizonMs = 15 * 60_000;
 const operationIdPattern = /^[0-9a-f]{64}$/;
@@ -359,7 +360,7 @@ export class ReviewDurableObject extends DurableObject<Env> {
 
     if (request.state === "pending") return this.resumeReview(request, requests, store);
     if (request.state === "complete") return requestResponse(request, await this.getStoredReview(request, store));
-    let ci;
+    let ci: Awaited<ReturnType<typeof readRequiredCi>>;
     try {
       ci = await readRequiredCi(github, pullRequest);
     } catch (error) {
@@ -383,7 +384,7 @@ export class ReviewDurableObject extends DurableObject<Env> {
       const completed = await requests.get(request.reviewId);
       return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
     }
-    let snapshot;
+    let snapshot: Awaited<ReturnType<typeof createReviewSnapshot>>;
     try {
       snapshot = await createReviewSnapshot(github, pullRequest, ci);
     } catch (error) {
@@ -413,7 +414,7 @@ export class ReviewDurableObject extends DurableObject<Env> {
       const completed = await requests.get(request.reviewId);
       return completed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(completed, undefined);
     }
-    let authStatus;
+    let authStatus: CredentialAuthStatus;
     try {
       authStatus = await this.env.CREDENTIALS.get(this.env.CREDENTIALS.idFromName(credentialOwnerName)).checkAuth();
     } catch {
@@ -464,7 +465,7 @@ export class ReviewDurableObject extends DurableObject<Env> {
       const failed = await requests.get(request.reviewId);
       return failed === undefined ? json(503, { reviewId: request.reviewId, status: "service_unavailable" }) : requestResponse(failed, await store.get(identity));
     }
-    let authStatus;
+    let authStatus: CredentialAuthStatus;
     try {
       authStatus = await this.env.CREDENTIALS.get(this.env.CREDENTIALS.idFromName(credentialOwnerName)).checkAuth();
     } catch {

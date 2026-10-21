@@ -1,4 +1,6 @@
 node_modules/
+dist/
+.wrangler/
 apps/pr-inbox/config.local.json
 apps/review-worker/.dev.vars
 apps/review-worker/.dev.vars.*

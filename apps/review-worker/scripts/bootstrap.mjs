@@ -26,7 +26,7 @@ async function installationId() {
 function hiddenPrompt(message, signal) {
   if (!process.stdin.isTTY) throw Error('An interactive terminal is required');
   signal?.throwIfAborted();
-  process.stderr.write(message + ': ');
+  process.stderr.write(`${message}: `);
   return new Promise((resolve, reject) => {
     let value = '';
     const wasRaw = process.stdin.isRaw;
@@ -56,7 +56,7 @@ async function officialLogin(options) {
   return models.login('openai', 'oauth', {
     prompt: p => hiddenPrompt(p.message, p.signal),
     notify: event => {
-      if (event.type === 'auth_url') process.stderr.write('Open this official sign-in URL in your browser:\n' + event.url + '\n');
+      if (event.type === 'auth_url') process.stderr.write(`Open this official sign-in URL in your browser:\n${event.url}\n`);
     },
   }, options);
 }
@@ -82,6 +82,7 @@ async function availableAccountModels(accessToken, fetchImpl, supportedSlugs) {
     if (typeof slug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(slug) || !supportedSlugs.has(slug) || seen.has(slug)) continue;
     seen.add(slug);
     const displayName = typeof model.display_name === 'string'
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitize provider-controlled model names.
       ? model.display_name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').trim().slice(0, 120)
       : '';
     usable.push({ slug, displayName: displayName || slug });

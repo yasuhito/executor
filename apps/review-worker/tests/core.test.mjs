@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  ReviewConflictError,
   buildReviewPrompt,
   canonicalSnapshot,
   invalidateVerdict,
@@ -131,7 +130,7 @@ test("malformed repository or commit identities are rejected before review", () 
 
 test("a replayed identity with changed diff cannot acquire the existing review", async () => {
   const store = new MemoryStore();
-  const first = await review(makeSnapshot(), new FakeHarness(), store);
+  await review(makeSnapshot(), new FakeHarness(), store);
   const altered = parseReviewSnapshot(makeSnapshot({ files: [{ path: "Cargo.toml", status: "modified", patch: "injected" }] }));
   const conflict = await store.reserve(altered.identity, "different-snapshot-hash", altered);
 
@@ -202,7 +201,7 @@ test("interrupted service retries the same Pi operation instead of taking new ow
 });
 
 test("a head or tested-base change invalidates the old verdict", async () => {
-  const { snapshot, snapshotHash, result, store } = await review(makeSnapshot());
+  const { snapshot, snapshotHash, store } = await review(makeSnapshot());
   const changed = await invalidateVerdict(store, snapshot.identity, snapshotHash);
   const reread = await store.get(snapshot.identity);
 

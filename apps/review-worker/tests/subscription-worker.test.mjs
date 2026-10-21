@@ -18,7 +18,7 @@ const reviewRequest = (number, operationId) => ({ pullRequestUrl: pullRequestUrl
 async function signed(mf, path, value, secret = bootstrapSecret, nonce) {
   const body = JSON.stringify(value);
   const sig = await signRequest(secret, 'POST', path, new TextEncoder().encode(body), undefined, nonce);
-  return mf.dispatchFetch('https://review.example' + path, { method: 'POST', body, headers: { 'x-executor-timestamp': sig.timestamp, 'x-executor-nonce': sig.nonce, 'x-executor-signature': sig.signature } });
+  return mf.dispatchFetch(`https://review.example${path}`, { method: 'POST', body, headers: { 'x-executor-timestamp': sig.timestamp, 'x-executor-nonce': sig.nonce, 'x-executor-signature': sig.signature } });
 }
 async function setup(t, bindings = {}) {
   const {
@@ -74,7 +74,7 @@ async function setup(t, bindings = {}) {
         const text = JSON.stringify({ standards: { status: 'unverifiable', findings: [] }, changeIntent: { status: 'unverifiable', findings: [] } });
         const item = { type: 'message', id: 'msg_mock', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] };
         const events = [{ type: 'response.created', response: { id: 'resp_mock', status: 'in_progress' } }, { type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } }, { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: text }, { type: 'response.output_item.done', output_index: 0, item }, { type: 'response.completed', response: { id: 'resp_mock', status: 'completed', output: [item], usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } } }];
-        return new Response(events.map(e => 'event: ' + e.type + '\ndata: ' + JSON.stringify(e) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } });
+        return new Response(events.map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
       }
       const url = new URL(req.url);
       if (url.origin === 'https://api.github.com') {
@@ -112,7 +112,7 @@ async function setup(t, bindings = {}) {
         if (url.pathname.match(new RegExp(`^${prefix}/pulls/\\d+/commits$`))) return Response.json([{ commit: { message: 'Bump example from 1.0.0 to 1.0.1' } }]);
         if (url.pathname === `${prefix}/contents/AGENTS.md`) return Response.json({ type: 'file', encoding: 'base64', content: btoa('Repository review instructions') });
         if (url.pathname === `${prefix}/contents/CONTRIBUTING.md`) return Response.json({ message: 'Not Found' }, { status: 404 });
-        throw Error('Unmatched GitHub read endpoint: ' + url.pathname);
+        throw Error(`Unmatched GitHub read endpoint: ${url.pathname}`);
       }
       throw Error('Unmatched outbound URL forbidden');
     },
@@ -249,9 +249,9 @@ test('bootstrap requires HTTPS and exact signed path and body', { timeout: 60_00
   const sig = await signRequest(bootstrapSecret, 'POST', path, new TextEncoder().encode(body));
   const headers = { 'x-executor-timestamp': sig.timestamp, 'x-executor-nonce': sig.nonce, 'x-executor-signature': sig.signature };
   const statuses = [];
-  statuses.push((await s.mf.dispatchFetch('http://review.example' + path, { method: 'POST', body, headers })).status);
+  statuses.push((await s.mf.dispatchFetch(`http://review.example${path}`, { method: 'POST', body, headers })).status);
   statuses.push((await s.mf.dispatchFetch('https://review.example/v1/credentials/revoke', { method: 'POST', body, headers })).status);
-  statuses.push((await s.mf.dispatchFetch('https://review.example' + path, { method: 'POST', body: body + ' ', headers })).status);
+  statuses.push((await s.mf.dispatchFetch(`https://review.example${path}`, { method: 'POST', body: `${body} `, headers })).status);
   statuses.push((await signed(s.mf, path, { ...value, provider: 'other' })).status);
 
   assert.deepEqual(statuses, [400, 401, 401, 400]);

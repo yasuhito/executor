@@ -2,7 +2,7 @@ import type { WorkflowStepContext } from "apps";
 import { parseReviewIdentity, parseReviewVerdict } from "./review-protocol/core.ts";
 import { parsePullRequestUrl } from "./review-protocol/github-read.ts";
 import { signRequest } from "./review-protocol/auth.ts";
-import { requirements } from "./providers.ts";
+import type { requirements } from "./providers.ts";
 import type { ReviewServiceResult } from "./review-flow.ts";
 
 export type ReviewServiceContext = WorkflowStepContext<typeof requirements>;

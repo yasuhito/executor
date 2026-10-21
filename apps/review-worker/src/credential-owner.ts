@@ -130,7 +130,8 @@ export class CredentialDurableObject extends DurableObject<Env> {
     const body = await readBoundedBody(request, 16 * 1024);
     if (!body) return reply(413, 'request_too_large');
     if (!(await verifyRequest(secret, request, body))) return reply(401, 'unauthorized');
-    const nonce = request.headers.get('x-executor-nonce')!;
+    const nonce = request.headers.get('x-executor-nonce');
+    if (nonce === null) return reply(401, 'unauthorized');
     const inserted = this.ctx.storage.sql.exec('INSERT OR IGNORE INTO bootstrap_nonce(nonce) VALUES (?) RETURNING nonce', nonce).toArray();
     if (inserted.length !== 1) return reply(409, 'replayed_request');
     try {

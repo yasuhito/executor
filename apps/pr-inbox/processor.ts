@@ -19,7 +19,7 @@ import { githubReadContext } from "./github-api.ts";
 import { readPullRequest } from "./review-protocol/github-read.ts";
 import { invalidateReview, readReviewStatus, submitReview } from "./review-service.ts";
 import { processDependabotPullRequest, type ProcessingNotice, type ProcessingResult, type ReviewPort } from "./review-flow.ts";
-import { requirements } from "./providers.ts";
+import type { requirements } from "./providers.ts";
 import type { RepositoryConfig } from "./repositories.ts";
 import { sendTelegramNotification } from "./telegram.ts";
 

@@ -11,7 +11,7 @@ const metadata = new TextEncoder().encode('executor-review-credentials:v1:instal
 
 export function validateCredential(value: unknown, importing = false): asserts value is OAuthCredential {
   const c = value as OAuthCredential | undefined;
-  if (!c || c.type !== 'oauth' ||
+  if (c?.type !== 'oauth' ||
       typeof c.access !== 'string' || !c.access.trim() || c.access.startsWith('sk-') ||
       typeof c.refresh !== 'string' || !c.refresh.trim() ||
       typeof c.clientId !== 'string' || !c.clientId.trim() ||

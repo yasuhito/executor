@@ -1,6 +1,6 @@
 import type { WorkflowStepContext } from "apps";
 import type { GitHubReadContext } from "./review-protocol/github-read.ts";
-import { apiOrigin, requirements, type GitHubAccount } from "./providers.ts";
+import { apiOrigin, type requirements, type GitHubAccount } from "./providers.ts";
 import { repositoryPath, type RepositoryConfig } from "./repositories.ts";
 
 export type GitHubWorkflowContext = WorkflowStepContext<typeof requirements>;

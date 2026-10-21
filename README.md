@@ -34,13 +34,18 @@ The Executor app and Worker must have the same repository names and numeric IDs 
 
 The review Worker uses unauthenticated GitHub reads. Repositories must expose the pull-request data and checks it needs through GitHub's public API. Executor uses its configured GitHub account for the final merge request. Registration only updates the callback and signing secret of the exact pre-existing hook after checking its current settings. It does not create or delete hooks.
 
-## Validation
+## Contributing
 
-Run the packages' tests and type checks without deployment credentials:
+Use Node.js 22.19.0 (`.nvmrc`) and npm workspaces. From the repository root, install dependencies and run the checks:
 
 ```sh
-(cd apps/pr-inbox && npm ci --ignore-scripts && npm test && npm run typecheck)
-(cd apps/review-worker && npm ci --ignore-scripts && npm test && npm run typecheck)
+nvm use
+npm ci
+npm run lint
+npm run format
+npm run format:check
+npm run typecheck
+npm test
 ```
 
-The PR-inbox test command also scans source and documentation for deployment IDs, concrete Worker hostnames, and repository identifiers. Files under `tests/` and `examples/` are excluded from that scan so fixtures and placeholders remain usable.
+`npm run format` applies Biome formatting; `npm run format:check` verifies it without changing files. The PR-inbox test also scans source and documentation for deployment IDs, concrete Worker hostnames, and repository identifiers. Files under `tests/` and `examples/` are excluded from that scan so fixtures and placeholders remain usable.
