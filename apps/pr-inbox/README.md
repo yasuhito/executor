@@ -15,6 +15,10 @@ Registration verifies the exact existing GitHub hook and its callback settings b
 
 The app's configured GitHub and Telegram accounts are managed by Executor. Telegram is reserved for actionable `needs-attention` and `stale` results; successful dry-run reviews do not create routine notifications. The bot and approved private destination remain in Executor's secure accounts. The Worker HMAC secret is configured separately in the Worker and as the app's review-service secret account. Never place secret values in the JSON example or commit local configuration. `config.local.json` is ignored by Git.
 
+## Database migrations
+
+Once a migration has been applied to the hosted app database, its file is immutable. Do not edit or remove it; make schema changes in a new, higher-numbered migration. The migration tests pin SHA-256 hashes for migrations already applied to the live database.
+
 ## Local validation
 
 ```sh

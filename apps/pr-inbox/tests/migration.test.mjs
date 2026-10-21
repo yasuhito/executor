@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -10,6 +11,30 @@ const baseSha = "89abcdef0123456789abcdef0123456789abcdef";
 async function migration(name) {
   return readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8");
 }
+
+test("already-applied migrations match their immutable deployed hashes", async () => {
+  const expectedHashes = [
+    [
+      "0001_webhook_receipts.sql",
+      "50f30001e36f735b5d0b0f9c09764ff2c1299dcab88bac02b73ed5aeeea9913b",
+    ],
+    [
+      "0002_dependabot_review_queue.sql",
+      "5f800ff12dba6c7af4b44db86b2e8d096e8e5fc6bf19fa3f026173fdc30da820",
+    ],
+    [
+      "0003_url_only_review_telegram_pending.sql",
+      "d83916af27bbf42fe8079b01362306cc64a803d39298cc7ed9519d22fda170ff",
+    ],
+  ];
+
+  for (const [name, expectedHash] of expectedHashes) {
+    const hash = createHash("sha256")
+      .update(await migration(name))
+      .digest("hex");
+    assert.equal(hash, expectedHash, `${name} is an applied migration and must remain unchanged`);
+  }
+});
 
 test("multi-repository migration preserves queued work and removes repository-specific schema constraints", async () => {
   const database = new DatabaseSync(":memory:");
@@ -25,27 +50,22 @@ test("multi-repository migration preserves queued work and removes repository-sp
   database
     .prepare(`INSERT INTO webhook_receipts
     (delivery_id, event, action, repository, pull_request_number, head_sha, event_base_sha, pull_request_url, received_at, ping)
-    VALUES (?, 'pull_request', 'opened', 'example-owner/example-repository', 42, ?, ?, ?, 1, 0)`)
-    .run(
-      deliveryId,
-      headSha,
-      baseSha,
-      `https://github.com/example-owner/example-repository/pull/42`,
-    );
+    VALUES (?, 'pull_request', 'opened', 'qniapp/qni-webgpu', 42, ?, ?, ?, 1, 0)`)
+    .run(deliveryId, headSha, baseSha, `https://github.com/qniapp/qni-webgpu/pull/42`);
   database
     .prepare(`INSERT INTO review_queue
     (delivery_id, repository, pull_request_number, event_head_sha, state, received_at, updated_at, event_base_sha)
-    VALUES (?, 'example-owner/example-repository', 42, ?, 'queued', 1, 1, ?)`)
+    VALUES (?, 'qniapp/qni-webgpu', 42, ?, 'queued', 1, 1, ?)`)
     .run(deliveryId, headSha, baseSha);
   database
     .prepare(`INSERT INTO repository_locks
     (repository, run_id, lease_until, fencing, job_delivery_id)
-    VALUES ('example-owner/example-repository', 'run-fixture', 100, 1, NULL)`)
+    VALUES ('qniapp/qni-webgpu', 'run-fixture', 100, 1, NULL)`)
     .run();
   database
     .prepare(`INSERT INTO notification_outbox
     (notification_id, dedupe_key, repository, pull_request_number, head_sha, kind, message, status, next_attempt_at, created_at, updated_at)
-    VALUES (?, 'fixture-dedupe-key', 'example-owner/example-repository', 42, ?, 'needs-attention', 'safe fixture', 'queued', 1, 1, 1)`)
+    VALUES (?, 'fixture-dedupe-key', 'qniapp/qni-webgpu', 42, ?, 'needs-attention', 'safe fixture', 'queued', 1, 1, 1)`)
     .run("a".repeat(64), headSha);
 
   database.exec(await migration("0004_multi_repository_config.sql"));
@@ -89,15 +109,15 @@ test("multi-repository migration preserves queued work and removes repository-sp
     );
 
   assert.deepEqual(preserved, {
-    receipt: { repository: "example-owner/example-repository", event_base_sha: baseSha },
+    receipt: { repository: "qniapp/qni-webgpu", event_base_sha: baseSha },
     queue: {
-      repository: "example-owner/example-repository",
+      repository: "qniapp/qni-webgpu",
       state: "queued",
       event_base_sha: baseSha,
     },
-    lock: { repository: "example-owner/example-repository", run_id: "run-fixture", fencing: 1 },
+    lock: { repository: "qniapp/qni-webgpu", run_id: "run-fixture", fencing: 1 },
     notification: {
-      repository: "example-owner/example-repository",
+      repository: "qniapp/qni-webgpu",
       status: "queued",
       message: "safe fixture",
     },
