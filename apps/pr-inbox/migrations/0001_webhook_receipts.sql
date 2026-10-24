@@ -2,7 +2,7 @@ CREATE TABLE webhook_receipts (
   delivery_id TEXT PRIMARY KEY NOT NULL CHECK (length(delivery_id) = 36),
   event TEXT NOT NULL CHECK (event IN ('ping', 'pull_request')),
   action TEXT,
-  repository TEXT NOT NULL CHECK (length(repository) BETWEEN 3 AND 255),
+  repository TEXT NOT NULL CHECK (repository = 'qniapp/qni-webgpu'),
   pull_request_number INTEGER,
   head_sha TEXT,
   pull_request_url TEXT,

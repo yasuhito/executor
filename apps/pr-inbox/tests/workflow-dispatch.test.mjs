@@ -20,6 +20,7 @@ async function fixture() {
     "0002_dependabot_review_queue.sql",
     "0003_url_only_review_telegram_pending.sql",
     "0004_multi_repository_config.sql",
+    "0005_dry_run_mode.sql",
   ]) {
     db.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
@@ -30,7 +31,8 @@ async function fixture() {
         const rows = prepared.all(...bindings);
         return { rowsWritten: 0, toArray: () => rows };
       }
-      return { rowsWritten: Number(prepared.run(...bindings).changes), toArray: () => [] };
+      // Durable Object SQLite also counts index writes, so rowsWritten is not a row count.
+      return { rowsWritten: Number(prepared.run(...bindings).changes) * 2, toArray: () => [] };
     },
     transaction(work) {
       db.exec("BEGIN IMMEDIATE");

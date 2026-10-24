@@ -156,14 +156,17 @@ export function releaseRepositoryLock(
   input: { repository: string; runId: string; fencing: number; now: number },
 ): boolean {
   return (
-    sql.exec(
-      `UPDATE repository_locks SET lease_until = ?, job_delivery_id = NULL
-     WHERE repository = ? AND run_id = ? AND fencing = ? AND job_delivery_id IS NULL`,
-      input.now,
-      input.repository,
-      input.runId,
-      input.fencing,
-    ).rowsWritten === 1
+    sql
+      .exec(
+        `UPDATE repository_locks SET lease_until = ?, job_delivery_id = NULL
+       WHERE repository = ? AND run_id = ? AND fencing = ? AND job_delivery_id IS NULL
+       RETURNING repository`,
+        input.now,
+        input.repository,
+        input.runId,
+        input.fencing,
+      )
+      .toArray().length === 1
   );
 }
 
@@ -181,13 +184,14 @@ export function renewQueueLease(
     const leaseUntil = input.now + input.leaseMs;
     const lock = transaction.exec(
       `UPDATE repository_locks SET lease_until = ?
-       WHERE repository = ? AND run_id = ? AND fencing = ?`,
+       WHERE repository = ? AND run_id = ? AND fencing = ?
+       RETURNING repository`,
       leaseUntil,
       input.repository,
       input.runId,
       input.fencing,
     );
-    if (lock.rowsWritten !== 1) return null;
+    if (lock.toArray().length !== 1) return null;
     transaction.exec(
       `UPDATE review_queue SET lease_until = ?, updated_at = ?
        WHERE state = 'processing' AND run_id = ? AND fencing = ?`,
@@ -229,7 +233,8 @@ function finishInTransaction(transaction: SqlReader, input: QueueCompletion): bo
   const updated = transaction.exec(
     `UPDATE review_queue SET state = ?, run_id = NULL, fencing = NULL, lease_until = NULL,
        tested_base_sha = ?, snapshot_hash = ?, review_decision = ?, outcome_kind = ?, failure_code = ?, updated_at = ?
-     WHERE delivery_id = ? AND state = 'processing' AND run_id = ? AND fencing = ?`,
+     WHERE delivery_id = ? AND state = 'processing' AND run_id = ? AND fencing = ?
+     RETURNING delivery_id`,
     input.state,
     input.testedBaseSha,
     input.snapshotHash,
@@ -241,7 +246,7 @@ function finishInTransaction(transaction: SqlReader, input: QueueCompletion): bo
     input.runId,
     input.fencing,
   );
-  if (updated.rowsWritten !== 1) return false;
+  if (updated.toArray().length !== 1) return false;
   transaction.exec(
     `UPDATE repository_locks SET job_delivery_id = NULL, lease_until = ?
      WHERE repository = ? AND run_id = ? AND fencing = ?`,
@@ -382,12 +387,15 @@ function ownsNotificationLock(sql: SqlReader, input: NotificationLockInput): boo
 export function markSendingNotificationsUnknown(sql: Sql, input: NotificationLockInput): number {
   return sql.transaction((transaction) => {
     if (!ownsNotificationLock(transaction, input)) return 0;
-    return transaction.exec(
-      `UPDATE notification_outbox SET status = 'unknown', failure_code = 'telegram_delivery_unknown', updated_at = ?
-       WHERE repository = ? AND status = 'sending'`,
-      input.now,
-      input.repository,
-    ).rowsWritten;
+    return transaction
+      .exec(
+        `UPDATE notification_outbox SET status = 'unknown', failure_code = 'telegram_delivery_unknown', updated_at = ?
+       WHERE repository = ? AND status = 'sending'
+       RETURNING notification_id`,
+        input.now,
+        input.repository,
+      )
+      .toArray().length;
   });
 }
 
@@ -432,18 +440,21 @@ export function recordTelegramNotification(
     // Never turn an ambiguous delivery into a retry, or shorten Telegram's delay.
     if (retry && (!Number.isSafeInteger(delay) || delay < 1000 || delay > 3600000)) return false;
     return (
-      transaction.exec(
-        `UPDATE notification_outbox SET status = ?, failure_code = ?, next_attempt_at = ?, updated_at = ?
-       WHERE notification_id = ? AND repository = ? AND status = 'sending' AND send_run_id = ? AND send_fencing = ?`,
-        retry ? "queued" : input.outcome.status,
-        input.outcome.status === "sent" ? null : input.outcome.failureCode,
-        input.now + delay,
-        input.now,
-        input.notificationId,
-        input.repository,
-        input.runId,
-        input.fencing,
-      ).rowsWritten === 1
+      transaction
+        .exec(
+          `UPDATE notification_outbox SET status = ?, failure_code = ?, next_attempt_at = ?, updated_at = ?
+         WHERE notification_id = ? AND repository = ? AND status = 'sending' AND send_run_id = ? AND send_fencing = ?
+         RETURNING notification_id`,
+          retry ? "queued" : input.outcome.status,
+          input.outcome.status === "sent" ? null : input.outcome.failureCode,
+          input.now + delay,
+          input.now,
+          input.notificationId,
+          input.repository,
+          input.runId,
+          input.fencing,
+        )
+        .toArray().length === 1
     );
   });
 }

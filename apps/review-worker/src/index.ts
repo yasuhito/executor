@@ -64,6 +64,13 @@ function json(status: number, value: unknown): Response {
   return Response.json(value, { status, headers: { "cache-control": "no-store" } });
 }
 
+function errorClassName(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("name" in error)) return "UnknownError";
+  return typeof error.name === "string" && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+    ? error.name
+    : "UnknownError";
+}
+
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
@@ -103,6 +110,20 @@ function configuredRepositories(env: Env): RepositoryConfig[] | null {
   } catch {
     return null;
   }
+}
+
+function healthResponse(env: Env): Response {
+  const ready =
+    configuredRepositories(env) !== null &&
+    typeof env.REVIEW_HMAC_SECRET === "string" &&
+    env.REVIEW_HMAC_SECRET.length > 0 &&
+    typeof env.CREDENTIAL_BOOTSTRAP_SECRET === "string" &&
+    env.CREDENTIAL_BOOTSTRAP_SECRET.length > 0 &&
+    typeof env.CREDENTIAL_ENCRYPTION_KEY === "string" &&
+    env.CREDENTIAL_ENCRYPTION_KEY.length > 0 &&
+    typeof env.OPENAI_MODEL === "string" &&
+    env.OPENAI_MODEL.length > 0;
+  return json(ready ? 200 : 503, { status: ready ? "ok" : "configuration_unavailable" });
 }
 
 function parseReviewSubmission(
@@ -738,6 +759,10 @@ function targetReviewId(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/health") {
+      if (request.method !== "GET") return json(405, { status: "method_not_allowed" });
+      return healthResponse(env);
+    }
     if (path.startsWith("/v1/credentials/")) {
       if (
         !["/v1/credentials/import", "/v1/credentials/revoke", "/v1/credentials/status"].includes(
@@ -749,8 +774,14 @@ export default {
         return await env.CREDENTIALS.get(env.CREDENTIALS.idFromName(credentialOwnerName)).fetch(
           request,
         );
-      } catch {
-        return json(503, { status: "credentials_unavailable" });
+      } catch (error) {
+        console.error("Credential Durable Object request failed", {
+          errorClass: errorClassName(error),
+        });
+        return json(503, {
+          status: "credentials_unavailable",
+          errorCode: "credential_owner_unavailable",
+        });
       }
     }
     const repositories = configuredRepositories(env);

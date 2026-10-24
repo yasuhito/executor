@@ -57,6 +57,7 @@ test("the app keeps the existing webhook and registers its workflow, queries, an
       hasReviewQuery: "recentReviews" in tools,
       hasNotificationStatus: "notificationStatus" in tools,
       hasReplacementRegistrationDiagnostic: "replacementRegistrationDiagnostic" in tools,
+      hasHookOwnershipDiagnostic: tools.hookOwnershipDiagnostic?.kind === "query",
       recoverQueueIsExportedMutation:
         tools.recoverQueue === nativeOperation(definition.schedules.recoverQueue.operation),
       everyScheduleUsesExportedMutation: Object.values(definition.schedules).every(
@@ -73,6 +74,7 @@ test("the app keeps the existing webhook and registers its workflow, queries, an
       hasReviewQuery: true,
       hasNotificationStatus: true,
       hasReplacementRegistrationDiagnostic: true,
+      hasHookOwnershipDiagnostic: true,
       recoverQueueIsExportedMutation: true,
       everyScheduleUsesExportedMutation: true,
     },

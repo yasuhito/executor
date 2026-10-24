@@ -7,7 +7,7 @@ import {
 } from "./review-protocol/core.ts";
 import type { PullRequestObservation } from "./review-protocol/github-read.ts";
 
-export type NotificationKind = "merged" | "needs-attention" | "stale";
+export type NotificationKind = "dry-run" | "merged" | "needs-attention" | "stale";
 
 export interface ReviewCandidate {
   headSha: string;
@@ -320,7 +320,9 @@ export async function processDependabotPullRequest(
   expectedBaseSha: string | null,
   deliveryId: string,
   port: ReviewPort,
+  options: { dryRun?: boolean } = {},
 ): Promise<ProcessingResult> {
+  const dryRun = options.dryRun !== false;
   let activeIdentity: ReviewIdentity | null = null;
   let activeSnapshotHash: string | null = null;
   try {
@@ -499,6 +501,55 @@ export async function processDependabotPullRequest(
             "needs-attention",
             null,
             "At least one review axis found a concern or lacked sufficient evidence.",
+            response.verdict,
+          );
+        }
+        if (dryRun) {
+          if (!(await port.renewLease()))
+            return resultFromReviewFailure(
+              response.identity,
+              response.snapshotHash,
+              "lease_lost",
+              "The repository processing lease was lost before dry-run verification.",
+            );
+          const live = await checkLiveCandidate(
+            port,
+            pullRequestNumber,
+            expectedHeadSha,
+            expectedBaseSha,
+            repository,
+            response,
+          );
+          if (live.kind === "head_changed" || live.kind === "base_changed") {
+            await port.invalidate(response.reviewId);
+            return outcome(
+              "stale",
+              "stale",
+              response.identity,
+              response.snapshotHash,
+              null,
+              live.kind,
+              "The pull request changed before the dry-run result could be recorded.",
+              response.verdict,
+            );
+          }
+          if (live.kind === "invalid") {
+            await port.invalidate(response.reviewId);
+            return resultFromReviewFailure(
+              response.identity,
+              response.snapshotHash,
+              "pull_request_no_longer_reviewable",
+              "The pull request no longer matches the reviewed identity.",
+            );
+          }
+          return outcome(
+            "complete",
+            "dry-run",
+            response.identity,
+            response.snapshotHash,
+            "reviewable",
+            null,
+            "Both review axes passed; dry-run verification completed without a merge request.",
             response.verdict,
           );
         }

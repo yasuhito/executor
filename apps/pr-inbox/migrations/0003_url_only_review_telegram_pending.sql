@@ -14,7 +14,7 @@ DROP TABLE notification_outbox;
 CREATE TABLE notification_outbox (
   notification_id TEXT PRIMARY KEY NOT NULL CHECK (length(notification_id) = 64),
   dedupe_key TEXT NOT NULL UNIQUE,
-  repository TEXT NOT NULL CHECK (length(repository) BETWEEN 3 AND 255),
+  repository TEXT NOT NULL CHECK (repository = 'qniapp/qni-webgpu'),
   pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0),
   head_sha TEXT NOT NULL CHECK (length(head_sha) = 40),
   tested_base_sha TEXT CHECK (tested_base_sha IS NULL OR length(tested_base_sha) = 40),

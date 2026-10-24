@@ -50,6 +50,9 @@ async function setup(t, { omitReviewHmacSecret = false } = {}) {
   let outbound = 0;
   const bindings = {
     REPOSITORIES: JSON.stringify([{ fullName: "example-owner/example-repository", id: 123456789 }]),
+    CREDENTIAL_BOOTSTRAP_SECRET: "test-only-bootstrap-secret-0123456789",
+    CREDENTIAL_ENCRYPTION_KEY: "test-only-encryption-key-0123456789",
+    OPENAI_MODEL: "gpt-6.1-sol",
     ...(omitReviewHmacSecret ? {} : { REVIEW_HMAC_SECRET: secret }),
   };
   const mf = new Miniflare(
@@ -76,6 +79,27 @@ async function setup(t, { omitReviewHmacSecret = false } = {}) {
   });
   return { mf, outbound: () => outbound };
 }
+
+test("health exposes only availability when runtime configuration is present", {
+  timeout: 45_000,
+}, async (t) => {
+  const { mf } = await setup(t);
+  const response = await mf.dispatchFetch("https://review.example/health");
+
+  assert.deepEqual([response.status, await response.json()], [200, { status: "ok" }]);
+});
+
+test("health rejects missing runtime secrets without exposing binding details", {
+  timeout: 45_000,
+}, async (t) => {
+  const { mf } = await setup(t, { omitReviewHmacSecret: true });
+  const response = await mf.dispatchFetch("https://review.example/health");
+
+  assert.deepEqual(
+    [response.status, await response.json()],
+    [503, { status: "configuration_unavailable" }],
+  );
+});
 
 test("a missing review HMAC secret rejects requests with a nonce without crashing", {
   timeout: 45_000,

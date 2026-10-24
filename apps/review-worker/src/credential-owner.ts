@@ -9,8 +9,32 @@ import type { Env } from "./index.ts";
 export const credentialOwnerName = "installation";
 type AuthState = "ready" | "reauth_required";
 type AuthCheck = "ready" | "reauth_required" | "unavailable";
-const reply = (status: number, state: string) =>
-  Response.json({ status: state }, { status, headers: { "cache-control": "no-store" } });
+const reply = (status: number, state: string, errorCode?: string) =>
+  Response.json(
+    { status: state, ...(errorCode === undefined ? {} : { errorCode }) },
+    { status, headers: { "cache-control": "no-store" } },
+  );
+
+function errorClassName(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("name" in error)) return "UnknownError";
+  return typeof error.name === "string" && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+    ? error.name
+    : "UnknownError";
+}
+
+function operationErrorCode(error: unknown, errorClass: string): string {
+  if (errorClass === "OperationError") return "crypto_operation_failed";
+  if (
+    errorClass === "InvalidCharacterError" ||
+    (typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      error.message === "Invalid credential encryption binding")
+  ) {
+    return "invalid_encryption_binding";
+  }
+  return "credential_operation_failed";
+}
 
 function errorText(error: unknown): string {
   const parts: string[] = [];
@@ -144,9 +168,24 @@ export class CredentialDurableObject extends DurableObject<Env> {
   }
 
   private async statusResponse(): Promise<Response> {
-    const configured = (await this.credentials.list()).some(
-      ({ providerId }) => providerId === "openai",
-    );
+    let configured: boolean;
+    try {
+      configured = (await this.credentials.list()).some(
+        ({ providerId }) => providerId === "openai",
+      );
+    } catch (error) {
+      const errorClass = errorClassName(error);
+      if (errorClass !== "OperationError") throw error;
+      console.error("Credential status decryption failed", { errorClass });
+      return Response.json(
+        {
+          status: "unconfigured",
+          errorCode: "crypto_operation_failed",
+          reauthRequired: true,
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
     const reauthRequired = this.readAuthState() === "reauth_required";
     return Response.json(
       { status: configured ? "configured" : "unconfigured", reauthRequired },
@@ -190,17 +229,20 @@ export class CredentialDurableObject extends DurableObject<Env> {
         } catch {
           return reply(400, "invalid_credential");
         }
-        await this.credentials.modify("openai", async () => value.credential);
+        await this.credentials.replace("openai", value.credential);
         this.writeAuthState("ready", null);
       } else if (url.pathname.endsWith("/revoke")) {
         await this.credentials.delete("openai");
         this.writeAuthState("reauth_required", "operator_revoked");
       } else if (url.pathname.endsWith("/status")) {
-        return this.statusResponse();
+        return await this.statusResponse();
       }
-      return this.statusResponse();
-    } catch {
-      return reply(503, "credential_operation_failed");
+      return await this.statusResponse();
+    } catch (error) {
+      const errorClass = errorClassName(error);
+      console.error("Credential operation failed", { errorClass });
+      const errorCode = operationErrorCode(error, errorClass);
+      return reply(503, "credential_operation_failed", errorCode);
     }
   }
 }
