@@ -19,8 +19,8 @@ callbacks must be canonical HTTPS URLs on the same origin, with distinct paths.
 The account and repository numeric identity must match the approved configuration.
 
 Run locally: `npm test` and `npm run typecheck` in this app directory.
-Migrations `0006_guarded_hook_ownership.sql` and `0007_expiring_hook_locks.sql`
-are additive; do not edit applied migrations. They do not backfill legacy
+Migrations `0006_guarded_hook_ownership.sql`, `0007_expiring_hook_locks.sql` and
+`0008_registration_failure_reasons.sql` are additive; do not edit applied migrations. They do not backfill legacy
 ownership or grant deletion rights.
 
 ## Read-only diagnostics
@@ -32,12 +32,23 @@ ownership or grant deletion rights.
   `recordId` is `registration.migrationRecordId`, not the Executor subscription ID.
   Possible details include `invalid_input/input`, `identity_hash_failed/identity`,
   `claim_failed/storage`, `registration_blocked/storage`, `preflight_failed/hook`,
-  `mutation_unresolved/hook`, or `complete/hook`.
+  `mutation_unresolved/hook`, or `complete/hook`. A blocked or failed attempt
+  also carries a fixed `reason` (for example `reservation_leased`,
+  `reservation_identity_mismatch`, `hook_busy`, `github_status`,
+  `github_request_failed`, `shared_hook_mismatch`, `hook_has_other_owner`), the
+  GitHub `httpStatus` when one was returned, and `recordedAt`.
 - `replacementRegistrationDiagnostic({ recordId })` uses the same
   `registration.migrationRecordId` and independently reads the durable reservation
   phase. `patching` means **mutation outcome unresolved**, including
   POST; no automatic retry is safe. A later blocked attempt may replace the detail
-  code but does not clear this reservation or the repository lock.
+  code but does not clear this reservation or the repository lock. `lease` is
+  `active`, `expired` (the next identical attempt may retake it) or `pinned`.
+- `hookOwnershipDiagnostic({ repositoryId })` reads the repository lock and owner
+  rows for a numeric GitHub repository ID: lock holder subscription, operation,
+  `lease`, `acquiredAt` and `leaseUntil`, and each owner's subscription, hook ID,
+  `createdHere` and `released`. A lock taken by an older deployed version, or
+  before `0008`, has a `null` holder; older versions insert locks that read as
+  `pinned`.
 
 These queries never return raw config, callbacks, hashes, fingerprints, or secrets.
 `not_recorded`, `before_reservation`, and `diagnostic_unavailable` are not success:
@@ -68,7 +79,9 @@ require operator investigation, not a new record ID or clearing a lock.
 References are durable and locks cover the entire repository across linked
 accounts. A lock expires after 60 seconds until its holder pins it immediately
 before a GitHub PATCH, POST, or DELETE, so an attempt interrupted before any
-mutation cannot strand the repository. A pinned lock never expires: do not
+mutation cannot strand the repository. A registration pins the lock and marks
+its reservation `patching` in one transaction, so a pinned registration lock
+always has a patching record. A pinned lock never expires: do not
 manually clear it without proving the external outcome. `0007` releases a legacy
 lock only when no registration can be mid-mutation and the repository has no
 created hook cleanup could delete. Cleanup releases only its own reference;

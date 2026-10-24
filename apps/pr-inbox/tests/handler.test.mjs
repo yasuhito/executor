@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   githubWebhook,
   readHookMigrationDiagnostic,
+  readHookOwnershipDiagnostic,
   readRecentReceipts,
   readRegistrationDetail,
   diagnoseRegistrationConfiguration,
@@ -26,6 +27,7 @@ async function createContext() {
     "0005_dry_run_mode.sql",
     "0006_guarded_hook_ownership.sql",
     "0007_expiring_hook_locks.sql",
+    "0008_registration_failure_reasons.sql",
   ]) {
     const migration = await readFile(
       new URL(`../migrations/${migrationName}`, import.meta.url),
@@ -557,6 +559,13 @@ test("bounds recent receipt queries to the newest 100 rows", async () => {
 });
 
 const diagnosticReservationId = "migration_test_record";
+
+/** The stored detail without its timestamp, after checking the timestamp is a real time. */
+function storedDetail(sql) {
+  const { recordedAt, ...detail } = readRegistrationDetail(sql, diagnosticReservationId);
+  if (detail.code !== "not_recorded") assert.ok(Number.isFinite(Date.parse(recordedAt)));
+  return detail;
+}
 const diagnosticSubscriptionId = "whk_test-diagnostic-subscription";
 
 function seedMigrationDiagnostic(sql, phase) {
@@ -585,6 +594,7 @@ test("registration diagnostic reports when no reservation was recorded", async (
     phase: null,
     subscriptionId: null,
     failureClass: "before_reservation",
+    lease: null,
   });
 });
 
@@ -597,6 +607,7 @@ test("registration diagnostic localizes a failure before the GitHub PATCH phase"
     phase: "preflight",
     subscriptionId: diagnosticSubscriptionId,
     failureClass: "pre_patch",
+    lease: "expired",
   });
 });
 
@@ -609,6 +620,7 @@ test("registration diagnostic treats a patching reservation as unresolved", asyn
     phase: "patching",
     subscriptionId: diagnosticSubscriptionId,
     failureClass: "patch_outcome_unresolved",
+    lease: "expired",
   });
 });
 
@@ -621,6 +633,7 @@ test("registration diagnostic reports a completed migration without sensitive fi
     phase: "complete",
     subscriptionId: diagnosticSubscriptionId,
     failureClass: "recorded_complete",
+    lease: "expired",
   });
 });
 
@@ -639,6 +652,7 @@ test("registration diagnostic does not expose malformed reservation data", async
     phase: null,
     subscriptionId: null,
     failureClass: "invalid_reservation",
+    lease: "expired",
   });
 });
 
@@ -657,6 +671,7 @@ test("registration diagnostic maps unreadable storage to a closed failure class"
     phase: null,
     subscriptionId: null,
     failureClass: "diagnostic_unavailable",
+    lease: null,
   });
 });
 
@@ -680,10 +695,12 @@ test("registration diagnostic issues only a SELECT for its reserved row", () => 
         phase: null,
         subscriptionId: null,
         failureClass: "before_reservation",
+        lease: null,
       },
       statements: [
         {
-          statement: "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
+          statement:
+            "SELECT lease_token, lease_until FROM github_hook_registrations WHERE subscription_id = ?",
           bindings: [diagnosticReservationId],
         },
       ],
@@ -1084,6 +1101,7 @@ test("an attempt interrupted before any GitHub mutation does not strand the hook
         phase: "complete",
         subscriptionId: replacementSubscriptionId,
         failureClass: "recorded_complete",
+        lease: "pinned",
       },
     },
   );
@@ -1491,9 +1509,11 @@ test("exact repository and target hook adoption uses GET/PATCH and never POST/DE
     ["GET", "GET", "GET", "PATCH", "GET"],
   );
   assert.equal(fixture.calls[2].path, approvedHookPath);
-  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+  assert.deepEqual(storedDetail(fixture.context.sql), {
     code: "complete",
     field: "hook",
+    reason: null,
+    httpStatus: null,
   });
 });
 
@@ -1552,7 +1572,7 @@ test("completed registration recreates a deleted hook and records the new owner"
       replacementSubscriptionId,
     )
     .toArray()[0];
-  const detail = readRegistrationDetail(fixture.context.sql, diagnosticReservationId);
+  const detail = storedDetail(fixture.context.sql);
 
   assert.deepEqual(outcome, { result: { hookId: approvedHookId + 11 } });
   assert.deepEqual(
@@ -1567,7 +1587,7 @@ test("completed registration recreates a deleted hook and records the new owner"
     },
     {
       owner: { hookId: approvedHookId + 11, createdHere: 1, released: 0 },
-      detail: { code: "complete", field: "hook" },
+      detail: { code: "complete", field: "hook", reason: null, httpStatus: null },
       recoveryMethods: ["GET", "GET", "POST", "GET"],
       postCount: 2,
       deleteCount: 0,
@@ -1624,9 +1644,11 @@ test("completed registration recreates after the recorded hook GET returns 404",
     ["GET", "GET", "GET", "GET", "POST", "GET"],
   );
   assert.equal(fixture.calls.filter(({ method }) => method === "POST").length, 2);
-  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+  assert.deepEqual(storedDetail(fixture.context.sql), {
     code: "complete",
     field: "hook",
+    reason: null,
+    httpStatus: null,
   });
 });
 
@@ -1657,9 +1679,11 @@ test("completed registration does not recreate a hook owned by another live subs
     false,
   );
   assert.equal(fixture.records.length, 0);
-  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+  assert.deepEqual(storedDetail(fixture.context.sql), {
     code: "preflight_failed",
     field: "hook",
+    reason: "hook_has_other_owner",
+    httpStatus: null,
   });
 });
 
@@ -1671,7 +1695,7 @@ test("ambiguous hook recreation leaves a durable unresolved reservation without 
   fixture.loseNextCreateResponse();
 
   const first = await registrationOutcome(fixture.context, input);
-  const detail = readRegistrationDetail(fixture.context.sql, diagnosticReservationId);
+  const detail = storedDetail(fixture.context.sql);
   const migration = readHookMigrationDiagnostic(fixture.context.sql, diagnosticReservationId);
   const callsAfterAmbiguousCreate = fixture.calls.length;
   const second = await registrationOutcome(fixture.context, input);
@@ -1683,12 +1707,18 @@ test("ambiguous hook recreation leaves a durable unresolved reservation without 
   assert.deepEqual(second, {
     error: "The approved webhook replacement is already claimed or unresolved.",
   });
-  assert.deepEqual(detail, { code: "mutation_unresolved", field: "hook" });
+  assert.deepEqual(detail, {
+    code: "mutation_unresolved",
+    field: "hook",
+    reason: "github_request_failed",
+    httpStatus: null,
+  });
   assert.deepEqual(migration, {
     reservation: "present",
     phase: "patching",
     subscriptionId: replacementSubscriptionId,
     failureClass: "patch_outcome_unresolved",
+    lease: "pinned",
   });
   assert.equal(fixture.calls.filter(({ method }) => method === "POST").length, 2);
   assert.equal(fixture.calls.length, callsAfterAmbiguousCreate);
@@ -1718,23 +1748,30 @@ test("preflight release SQL failure does not strand the hook lock or leak the er
   assert.equal(JSON.stringify(outcome).includes(fixtureSecret), false);
 });
 
-for (const [name, options] of [
-  ["duplicate targets", { hooks: [configuredHook(), configuredHook({ id: approvedHookId + 1 })] }],
-  ["wrong target ID", { hooks: [configuredHook({ id: approvedHookId + 1 })] }],
+for (const [name, options, reason] of [
+  [
+    "duplicate targets",
+    { hooks: [configuredHook(), configuredHook({ id: approvedHookId + 1 })] },
+    "ambiguous_hook",
+  ],
+  ["wrong target ID", { hooks: [configuredHook({ id: approvedHookId + 1 })] }, "ambiguous_hook"],
   [
     "approved ID at wrong URL",
     { hooks: [configuredHook({ config: { url: "https://other.invalid/hook" } })] },
+    "hook_mismatch",
   ],
-  ["wrong repository ID", { repoId: targetRepository.id + 1 }],
+  ["wrong repository ID", { repoId: targetRepository.id + 1 }, "repository_mismatch"],
 ]) {
   test(`self healing refuses ${name} without POST/PATCH/DELETE`, async () => {
     const fixture = await selfHealingFixture(options);
     const outcome = await registrationOutcome(fixture.context, registrationInput());
     assert.ok(outcome.error);
     assert.ok(fixture.calls.every(({ method }) => method === "GET"));
-    assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+    assert.deepEqual(storedDetail(fixture.context.sql), {
       code: "preflight_failed",
       field: "hook",
+      reason,
+      httpStatus: null,
     });
   });
 }
@@ -1751,7 +1788,7 @@ test("ambiguous creation and readback stop retries and leak no private data", as
       fixture.calls.filter(({ method }) => method === "POST" || method === "PATCH").length,
       1,
     );
-    const diagnostic = readRegistrationDetail(fixture.context.sql, diagnosticReservationId);
+    const diagnostic = storedDetail(fixture.context.sql);
     const printed = JSON.stringify([outcomes, diagnostic]);
     for (const privateValue of [
       fixtureSecret,
@@ -1909,9 +1946,11 @@ test("configuration preflight distinguishes flat migration config and nested fie
 test("invalid input, hashing and SQL claim errors have distinct sanitized detail", async () => {
   const fixture = await selfHealingFixture();
   await registrationOutcome(fixture.context, registrationInput({ secret: "" }));
-  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+  assert.deepEqual(storedDetail(fixture.context.sql), {
     code: "invalid_input",
     field: "input",
+    reason: null,
+    httpStatus: null,
   });
   const originalDigest = crypto.subtle.digest;
   crypto.subtle.digest = async () => {
@@ -1919,9 +1958,11 @@ test("invalid input, hashing and SQL claim errors have distinct sanitized detail
   };
   try {
     await registrationOutcome(fixture.context, registrationInput());
-    assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+    assert.deepEqual(storedDetail(fixture.context.sql), {
       code: "identity_hash_failed",
       field: "identity",
+      reason: null,
+      httpStatus: null,
     });
   } finally {
     crypto.subtle.digest = originalDigest;
@@ -1932,9 +1973,11 @@ test("invalid input, hashing and SQL claim errors have distinct sanitized detail
   };
   await registrationOutcome(fixture.context, registrationInput());
   fixture.context.sql.transaction = originalTransaction;
-  assert.deepEqual(readRegistrationDetail(fixture.context.sql, diagnosticReservationId), {
+  assert.deepEqual(storedDetail(fixture.context.sql), {
     code: "claim_failed",
     field: "storage",
+    reason: null,
+    httpStatus: null,
   });
   assert.equal(fixture.calls.length, 0);
 });
@@ -1971,12 +2014,271 @@ test("registration details are read-only and refuse unrecognized stored values",
     {
       exec(statement) {
         calls += 1;
-        assert.equal(statement, "SELECT code, field FROM github_hook_details WHERE record_id = ?");
+        assert.equal(
+          statement,
+          "SELECT code, field, reason, http_status, recorded_at FROM github_hook_details WHERE record_id = ?",
+        );
         return { toArray: () => [{ code: fixtureSecret, field: replacementCallbackUrl }] };
       },
     },
     "record",
   );
-  assert.deepEqual(result, { code: "diagnostic_unavailable", field: null });
+  assert.deepEqual(result, {
+    code: "diagnostic_unavailable",
+    field: null,
+    reason: null,
+    httpStatus: null,
+    recordedAt: null,
+  });
   assert.equal(calls, 1);
+});
+
+const hookResourceKey = `github-repository:${targetRepository.id}`;
+
+test("a busy repository lock records hook_busy and the diagnostic names its holder", async () => {
+  const fixture = await registrationFixture({ holdPreflight: true });
+  const holderSubscriptionId = "whk_test-lock-holder";
+  const holding = registrationOutcome(
+    fixture.context,
+    registrationInput({
+      subscriptionId: holderSubscriptionId,
+      config: withRegistration({ migrationRecordId: "migration_holder_record" }),
+    }),
+  );
+  await fixture.preflightStarted;
+  const blocked = await registrationOutcome(fixture.context, registrationInput());
+  const detail = storedDetail(fixture.context.sql);
+  const during = readHookOwnershipDiagnostic(fixture.context.sql, targetRepository.id);
+  fixture.releasePreflight();
+  await holding;
+  const after = readHookOwnershipDiagnostic(fixture.context.sql, targetRepository.id);
+
+  assert.deepEqual(
+    {
+      blocked,
+      detail,
+      lock: { ...during.lock, acquiredAt: null, leaseUntil: null },
+      leaseUntilIsFuture: Date.parse(during.lock.leaseUntil) > Date.now(),
+      acquiredAtIsPast: Date.parse(during.lock.acquiredAt) <= Date.now(),
+      lockAfterHolderFinished: after.lock,
+    },
+    {
+      blocked: { error: "GitHub webhook replacement failed; stop for operator recovery." },
+      detail: {
+        code: "preflight_failed",
+        field: "hook",
+        reason: "hook_busy",
+        httpStatus: null,
+      },
+      lock: {
+        holder: holderSubscriptionId,
+        operation: "register",
+        lease: "active",
+        acquiredAt: null,
+        leaseUntil: null,
+      },
+      leaseUntilIsFuture: true,
+      acquiredAtIsPast: true,
+      lockAfterHolderFinished: null,
+    },
+  );
+});
+
+test("a GitHub error status is recorded with its HTTP status and no mutation", async () => {
+  const fixture = await registrationFixture({ preflightStatus: 403 });
+  const outcome = await registrationOutcome(fixture.context, registrationInput());
+
+  assert.deepEqual(
+    {
+      outcome,
+      detail: storedDetail(fixture.context.sql),
+      methods: fixture.calls.map(({ method }) => method),
+      lock: readHookOwnershipDiagnostic(fixture.context.sql, targetRepository.id).lock,
+      reservation: readHookMigrationDiagnostic(fixture.context.sql, diagnosticReservationId).lease,
+    },
+    {
+      outcome: { error: "GitHub webhook replacement failed; stop for operator recovery." },
+      detail: {
+        code: "preflight_failed",
+        field: "hook",
+        reason: "github_status",
+        httpStatus: 403,
+      },
+      methods: ["GET"],
+      lock: null,
+      reservation: "expired",
+    },
+  );
+});
+
+test("a blocked registration names the reservation conflict", async () => {
+  const fixture = await registrationFixture({ holdPreflight: true });
+  const first = registrationOutcome(fixture.context, registrationInput());
+  await fixture.preflightStarted;
+  await registrationOutcome(fixture.context, registrationInput());
+  const leased = storedDetail(fixture.context.sql);
+  fixture.releasePreflight();
+  await first;
+  await registrationOutcome(
+    fixture.context,
+    registrationInput({ secret: "changed-fixture-secret" }),
+  );
+  const changedIdentity = storedDetail(fixture.context.sql);
+
+  assert.deepEqual(
+    { leased, changedIdentity },
+    {
+      leased: {
+        code: "registration_blocked",
+        field: "storage",
+        reason: "reservation_leased",
+        httpStatus: null,
+      },
+      changedIdentity: {
+        code: "registration_blocked",
+        field: "storage",
+        reason: "reservation_identity_mismatch",
+        httpStatus: null,
+      },
+    },
+  );
+});
+
+test("the repository lock is pinned only together with the patching reservation", async () => {
+  const fixture = await registrationFixture();
+  const sql = fixture.context.sql;
+  const originalExec = sql.exec;
+  sql.exec = (statement, ...bindings) =>
+    statement.includes("UPDATE github_hook_registrations") &&
+    typeof bindings[0] === "string" &&
+    bindings[0].includes('"phase":"patching"')
+      ? { rowsRead: 0, rowsWritten: 0, toArray: () => [] }
+      : originalExec(statement, ...bindings);
+  const outcome = await registrationOutcome(fixture.context, registrationInput());
+  sql.exec = originalExec;
+
+  assert.deepEqual(
+    {
+      outcome,
+      detail: storedDetail(sql),
+      mutations: fixture.calls.filter(({ method }) => method !== "GET").length,
+      locks: sql.exec("SELECT count(*) AS count FROM github_hook_locks").toArray()[0].count,
+      reservation: readHookMigrationDiagnostic(sql, diagnosticReservationId),
+    },
+    {
+      outcome: { error: "GitHub webhook replacement failed; stop for operator recovery." },
+      detail: {
+        code: "preflight_failed",
+        field: "hook",
+        reason: "reservation_lost",
+        httpStatus: null,
+      },
+      mutations: 0,
+      locks: 0,
+      reservation: {
+        reservation: "present",
+        phase: "preflight",
+        subscriptionId: replacementSubscriptionId,
+        failureClass: "pre_patch",
+        lease: "expired",
+      },
+    },
+  );
+});
+
+test("ownership diagnostic trusts a lock holder only while it is bound to the lock token", async () => {
+  const { sql } = await createContext();
+  // Older deployed versions insert locks without holder columns; the default lease is pinned.
+  sql.exec("INSERT INTO github_hook_locks (resource, token) VALUES (?, 'legacy')", hookResourceKey);
+  const legacy = readHookOwnershipDiagnostic(sql, targetRepository.id).lock;
+  sql.exec(
+    "UPDATE github_hook_locks SET holder = 'whk_test-stale-holder', holder_token = 'earlier', operation = 'register', lease_until = 1",
+  );
+  const stale = readHookOwnershipDiagnostic(sql, targetRepository.id).lock;
+
+  assert.deepEqual(
+    { legacy, stale },
+    {
+      legacy: {
+        holder: null,
+        operation: null,
+        lease: "pinned",
+        acquiredAt: null,
+        leaseUntil: null,
+      },
+      stale: {
+        holder: null,
+        operation: null,
+        lease: "expired",
+        acquiredAt: null,
+        leaseUntil: new Date(1).toISOString(),
+      },
+    },
+  );
+});
+
+test("ownership diagnostic lists owner rows without hashes and fails closed", async () => {
+  const { sql } = await createContext();
+  sql.exec(
+    `INSERT INTO github_hook_owners
+      (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here, released)
+     VALUES (?, ?, 'whk_test-adopted', 'private-callback-hash', 'private-secret-hash', 0, 1),
+            (?, ?, 'whk_test-created', 'private-callback-hash', 'private-secret-hash', 1, 0)`,
+    hookResourceKey,
+    approvedHookId,
+    hookResourceKey,
+    approvedHookId + 1,
+  );
+  const diagnostic = readHookOwnershipDiagnostic(sql, targetRepository.id);
+  const statements = [];
+  readHookOwnershipDiagnostic(
+    {
+      exec(statement) {
+        statements.push(statement.trim().split(/\s+/)[0]);
+        return { toArray: () => [] };
+      },
+    },
+    targetRepository.id,
+  );
+
+  assert.deepEqual(
+    {
+      diagnostic,
+      leaksHashes: JSON.stringify(diagnostic).includes("private-"),
+      statements,
+      invalidRepository: readHookOwnershipDiagnostic(sql, 0),
+      unreadable: readHookOwnershipDiagnostic(
+        {
+          exec() {
+            throw new Error("private storage failure");
+          },
+        },
+        targetRepository.id,
+      ),
+    },
+    {
+      diagnostic: {
+        available: true,
+        lock: null,
+        owners: [
+          {
+            subscriptionId: "whk_test-adopted",
+            hookId: approvedHookId,
+            createdHere: false,
+            released: true,
+          },
+          {
+            subscriptionId: "whk_test-created",
+            hookId: approvedHookId + 1,
+            createdHere: true,
+            released: false,
+          },
+        ],
+      },
+      leaksHashes: false,
+      statements: ["SELECT", "SELECT"],
+      invalidRepository: { available: false, lock: null, owners: [] },
+      unreadable: { available: false, lock: null, owners: [] },
+    },
+  );
 });

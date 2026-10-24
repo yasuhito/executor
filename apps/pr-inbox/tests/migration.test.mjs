@@ -282,3 +282,69 @@ test("expiring hook lock migration releases a legacy lock only when no GitHub mu
     "deletable created hook": "held",
   });
 });
+
+test("failure reason migration keeps existing details and locks with unknown holders", async () => {
+  const database = new DatabaseSync(":memory:");
+  for (const file of [
+    "0001_webhook_receipts.sql",
+    "0002_dependabot_review_queue.sql",
+    "0003_url_only_review_telegram_pending.sql",
+    "0004_multi_repository_config.sql",
+    "0005_dry_run_mode.sql",
+    "0006_guarded_hook_ownership.sql",
+    "0007_expiring_hook_locks.sql",
+  ])
+    database.exec(await migration(file));
+  database.exec(
+    "INSERT INTO github_hook_details (record_id, code, field) VALUES ('record', 'preflight_failed', 'hook')",
+  );
+  database.exec(
+    "INSERT INTO github_hook_locks (resource, token, lease_until) VALUES ('github-repository:42', 'held', 9007199254740991)",
+  );
+  database.exec(await migration("0008_registration_failure_reasons.sql"));
+  // Older deployed versions keep inserting locks with only the columns they know.
+  database.exec(
+    "INSERT INTO github_hook_locks (resource, token) VALUES ('github-repository:43', 'older')",
+  );
+
+  assert.deepEqual(
+    {
+      detail: { ...database.prepare("SELECT * FROM github_hook_details").get() },
+      locks: database
+        .prepare("SELECT * FROM github_hook_locks ORDER BY resource")
+        .all()
+        .map((row) => ({ ...row })),
+    },
+    {
+      detail: {
+        record_id: "record",
+        code: "preflight_failed",
+        field: "hook",
+        reason: null,
+        http_status: null,
+        recorded_at: null,
+      },
+      locks: [
+        {
+          resource: "github-repository:42",
+          token: "held",
+          lease_until: 9007199254740991,
+          holder: null,
+          holder_token: null,
+          operation: null,
+          acquired_at: null,
+        },
+        {
+          resource: "github-repository:43",
+          token: "older",
+          lease_until: 9007199254740991,
+          holder: null,
+          holder_token: null,
+          operation: null,
+          acquired_at: null,
+        },
+      ],
+    },
+  );
+  database.close();
+});
