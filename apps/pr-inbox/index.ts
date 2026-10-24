@@ -391,6 +391,7 @@ interface HookMigrationRow extends Record<string, string | number | null | Array
 
 interface HookMigrationDiagnosticRow extends Record<string, string | number | null | ArrayBuffer> {
   lease_token: string | null;
+  lease_until: number | null;
 }
 
 interface HookMigrationState {
@@ -529,11 +530,21 @@ type HookMigrationFailureClass =
   | "invalid_reservation"
   | "diagnostic_unavailable";
 
+/** `pinned` never expires; `expired` can be retaken by the next identical attempt. */
+type LeaseState = "active" | "expired" | "pinned";
+
 interface HookMigrationDiagnostic {
   reservation: "absent" | "present" | "unavailable";
   phase: HookMigrationState["phase"] | null;
   subscriptionId: string | null;
   failureClass: HookMigrationFailureClass;
+  lease: LeaseState | null;
+}
+
+function leaseState(leaseUntil: unknown, now: number): LeaseState | null {
+  if (typeof leaseUntil !== "number" || !Number.isSafeInteger(leaseUntil)) return null;
+  if (leaseUntil >= completedLeaseUntil) return "pinned";
+  return leaseUntil > now ? "active" : "expired";
 }
 
 function matchesMigrationIdentity(
@@ -559,7 +570,7 @@ export function readHookMigrationDiagnostic(
   try {
     const row = sql
       .exec<HookMigrationDiagnosticRow>(
-        "SELECT lease_token FROM github_hook_registrations WHERE subscription_id = ?",
+        "SELECT lease_token, lease_until FROM github_hook_registrations WHERE subscription_id = ?",
         recordId,
       )
       .toArray()[0];
@@ -570,6 +581,7 @@ export function readHookMigrationDiagnostic(
         phase: null,
         subscriptionId: null,
         failureClass: "before_reservation",
+        lease: null,
       };
     }
 
@@ -581,6 +593,7 @@ export function readHookMigrationDiagnostic(
         phase: null,
         subscriptionId: null,
         failureClass: "invalid_reservation",
+        lease: leaseState(row.lease_until, Date.now()),
       };
     }
 
@@ -595,6 +608,7 @@ export function readHookMigrationDiagnostic(
       phase: state.phase,
       subscriptionId: state.subscriptionId,
       failureClass,
+      lease: leaseState(row.lease_until, Date.now()),
     };
   } catch {
     return {
@@ -602,6 +616,7 @@ export function readHookMigrationDiagnostic(
       phase: null,
       subscriptionId: null,
       failureClass: "diagnostic_unavailable",
+      lease: null,
     };
   }
 }
@@ -614,7 +629,7 @@ function claimHookMigration(
 ):
   | { kind: "acquired"; state: HookMigrationState }
   | { kind: "complete"; state: HookMigrationState }
-  | { kind: "blocked" } {
+  | { kind: "blocked"; reason: HookFailureReason } {
   const now = Date.now();
   const state: HookMigrationState = {
     version: 1,
@@ -642,23 +657,21 @@ function claimHookMigration(
         encoded,
         now + registrationLeaseMs,
       ).rowsWritten;
-      return inserted === 1 ? { kind: "acquired", state } : { kind: "blocked" };
+      return inserted === 1
+        ? { kind: "acquired", state }
+        : { kind: "blocked", reason: "reservation_lost" };
     }
 
     const row = rows[0];
     const current = decodeMigrationState(row.lease_token);
-    if (
-      row.hook_id !== hookId ||
-      row.lease_until === null ||
-      current === null ||
-      !matchesMigrationIdentity(current, identity)
-    ) {
-      return { kind: "blocked" };
-    }
+    if (row.lease_until === null || current === null)
+      return { kind: "blocked", reason: "reservation_invalid" };
+    if (row.hook_id !== hookId) return { kind: "blocked", reason: "reservation_hook_mismatch" };
+    if (!matchesMigrationIdentity(current, identity))
+      return { kind: "blocked", reason: "reservation_identity_mismatch" };
     if (current.phase === "complete") return { kind: "complete", state: current };
-    if (current.phase === "patching" || row.lease_until > now) {
-      return { kind: "blocked" };
-    }
+    if (current.phase === "patching") return { kind: "blocked", reason: "reservation_patching" };
+    if (row.lease_until > now) return { kind: "blocked", reason: "reservation_leased" };
 
     const updated = transaction.exec(
       `UPDATE github_hook_registrations
@@ -671,12 +684,14 @@ function claimHookMigration(
       row.lease_token,
       now,
     ).rowsWritten;
-    return updated === 1 ? { kind: "acquired", state } : { kind: "blocked" };
+    return updated === 1
+      ? { kind: "acquired", state }
+      : { kind: "blocked", reason: "reservation_lost" };
   });
 }
 
 function startHookMigrationMutation(
-  sql: Sql,
+  sql: SqlReader,
   state: HookMigrationState,
   recordId: string,
 ): HookMigrationState | null {
@@ -726,6 +741,65 @@ function apiSignal(signal: AbortSignal): AbortSignal {
   return AbortSignal.any([signal, AbortSignal.timeout(apiTimeoutMs)]);
 }
 
+/** Fixed reasons only: operators see which check stopped a registration, never input values. */
+const hookFailureReasons = [
+  "reservation_leased",
+  "reservation_patching",
+  "reservation_identity_mismatch",
+  "reservation_hook_mismatch",
+  "reservation_invalid",
+  "reservation_lost",
+  "hook_busy",
+  "hook_lock_lost",
+  "github_request_failed",
+  "github_redirect",
+  "github_status",
+  "github_invalid_response",
+  "hook_list_incomplete",
+  "repository_mismatch",
+  "ambiguous_hook",
+  "hook_mismatch",
+  "hook_identity_mismatch",
+  "shared_hook_mismatch",
+  "hook_has_other_owner",
+  "registration_owner_mismatch",
+  "recorded_hook_mismatch",
+  "hook_reappeared_during_recovery",
+  "creation_unresolved",
+  "readback_mismatch",
+  "owner_record_failed",
+  "completion_record_failed",
+  "unexpected",
+] as const;
+type HookFailureReason = (typeof hookFailureReasons)[number];
+const hookFailureReasonSet = new Set<string>(hookFailureReasons);
+
+class HookFailure extends Error {
+  readonly reason: HookFailureReason;
+  readonly httpStatus: number | null;
+
+  constructor(
+    reason: HookFailureReason,
+    message: string = reason,
+    httpStatus: number | null = null,
+  ) {
+    super(message);
+    this.reason = reason;
+    this.httpStatus = httpStatus;
+  }
+}
+
+interface HookFailureDetail {
+  reason: HookFailureReason;
+  httpStatus: number | null;
+}
+
+function failureDetail(error: unknown): HookFailureDetail {
+  return error instanceof HookFailure
+    ? { reason: error.reason, httpStatus: error.httpStatus }
+    : { reason: "unexpected", httpStatus: null };
+}
+
 async function githubRequest(
   context: HookContext,
   account: GitHubAccount,
@@ -751,23 +825,27 @@ async function githubRequest(
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
-    throw new Error("GitHub API request failed.");
+    throw new HookFailure("github_request_failed", "GitHub API request failed.");
   }
 }
 
 function requireStatus(response: Response, expected: number | readonly number[]): void {
   if (response.status >= 300 && response.status < 400)
-    throw new Error("GitHub API redirected the request.");
+    throw new HookFailure("github_redirect", "GitHub API redirected the request.", response.status);
   const accepted = typeof expected === "number" ? [expected] : expected;
   if (!accepted.includes(response.status))
-    throw new Error(`GitHub API returned HTTP ${response.status}.`);
+    throw new HookFailure(
+      "github_status",
+      `GitHub API returned HTTP ${response.status}.`,
+      response.status,
+    );
 }
 
 async function responseJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
   } catch {
-    throw new Error("GitHub API returned invalid JSON.");
+    throw new HookFailure("github_invalid_response", "GitHub API returned invalid JSON.");
   }
 }
 
@@ -786,7 +864,10 @@ function parseHook(value: unknown): HookSummary {
     typeof value.config.content_type !== "string" ||
     (typeof value.config.insecure_ssl !== "string" && typeof value.config.insecure_ssl !== "number")
   ) {
-    throw new Error("GitHub API returned an invalid webhook record.");
+    throw new HookFailure(
+      "github_invalid_response",
+      "GitHub API returned an invalid webhook record.",
+    );
   }
   return {
     id: value.id,
@@ -818,7 +899,10 @@ async function verifySavedHook(
 ): Promise<number> {
   const hook = parseHook(await responseJson(response));
   if (hook.id !== expectedId || !isConfiguredHook(hook, callbackUrl)) {
-    throw new Error("GitHub did not save the expected webhook configuration.");
+    throw new HookFailure(
+      "readback_mismatch",
+      "GitHub did not save the expected webhook configuration.",
+    );
   }
   return hook.id;
 }
@@ -935,40 +1019,75 @@ function recordDetail(
   recordId: string,
   code: RegistrationDetailCode,
   field: RegistrationDetailField,
+  failure: HookFailureDetail | null = null,
 ): void {
   try {
     sql.exec(
-      `INSERT INTO github_hook_details (record_id, code, field) VALUES (?, ?, ?)
-      ON CONFLICT(record_id) DO UPDATE SET code = excluded.code, field = excluded.field`,
+      `INSERT INTO github_hook_details (record_id, code, field, reason, http_status, recorded_at)
+       VALUES (?, ?, ?, ?, ?, CAST(? AS INTEGER))
+       ON CONFLICT(record_id) DO UPDATE SET code = excluded.code, field = excluded.field,
+         reason = excluded.reason, http_status = excluded.http_status,
+         recorded_at = excluded.recorded_at`,
       recordId,
       code,
       field,
+      failure?.reason ?? null,
+      failure?.httpStatus ?? null,
+      Date.now(),
     );
   } catch {
     // Storage failure must not cause raw input or provider errors to escape.
   }
 }
 
-export function readRegistrationDetail(
-  sql: SqlReader,
-  recordId: string,
-): { code: string; field: string | null } {
+interface RegistrationDetail {
+  code: string;
+  field: string | null;
+  reason: HookFailureReason | null;
+  httpStatus: number | null;
+  recordedAt: string | null;
+}
+
+function unavailableDetail(code: "not_recorded" | "diagnostic_unavailable"): RegistrationDetail {
+  return { code, field: null, reason: null, httpStatus: null, recordedAt: null };
+}
+
+function isoTime(value: unknown): string | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? new Date(value).toISOString()
+    : null;
+}
+
+export function readRegistrationDetail(sql: SqlReader, recordId: string): RegistrationDetail {
   try {
     const row = sql
-      .exec("SELECT code, field FROM github_hook_details WHERE record_id = ?", recordId)
+      .exec(
+        "SELECT code, field, reason, http_status, recorded_at FROM github_hook_details WHERE record_id = ?",
+        recordId,
+      )
       .toArray()[0];
-    if (row === undefined) return { code: "not_recorded", field: null };
+    if (row === undefined) return unavailableDetail("not_recorded");
     if (
       typeof row.code !== "string" ||
       !detailCodes.has(row.code) ||
       typeof row.field !== "string" ||
-      !detailFields.has(row.field)
+      !detailFields.has(row.field) ||
+      (row.reason !== null &&
+        (typeof row.reason !== "string" || !hookFailureReasonSet.has(row.reason))) ||
+      (row.http_status !== null &&
+        (typeof row.http_status !== "number" || !Number.isSafeInteger(row.http_status)))
     ) {
-      return { code: "diagnostic_unavailable", field: null };
+      return unavailableDetail("diagnostic_unavailable");
     }
-    return { code: row.code, field: row.field };
+    return {
+      code: row.code,
+      field: row.field,
+      reason: row.reason as HookFailureReason | null,
+      httpStatus: row.http_status as number | null,
+      recordedAt: isoTime(row.recorded_at),
+    };
   } catch {
-    return { code: "diagnostic_unavailable", field: null };
+    return unavailableDetail("diagnostic_unavailable");
   }
 }
 
@@ -977,26 +1096,40 @@ function hookResource(repositoryId: number): string {
   return `github-repository:${repositoryId}`;
 }
 
+type HookLockOperation = "register" | "unregister";
+
+interface HookLockHolder {
+  subscriptionId: string;
+  operation: HookLockOperation;
+}
+
 /** A holder that stops before pinning can never have mutated GitHub, so its lock expires. */
-function lockHook(sql: Sql, resource: string, token: string): boolean {
+function lockHook(sql: Sql, resource: string, token: string, holder: HookLockHolder): boolean {
   const now = Date.now();
   return (
     sql.exec(
-      `INSERT INTO github_hook_locks (resource, token, lease_until)
-       VALUES (?, ?, CAST(? AS INTEGER))
+      `INSERT INTO github_hook_locks
+         (resource, token, lease_until, holder, holder_token, operation, acquired_at)
+       VALUES (?, ?, CAST(? AS INTEGER), ?, ?, ?, CAST(? AS INTEGER))
        ON CONFLICT(resource) DO UPDATE
-       SET token = excluded.token, lease_until = excluded.lease_until
+       SET token = excluded.token, lease_until = excluded.lease_until,
+         holder = excluded.holder, holder_token = excluded.holder_token,
+         operation = excluded.operation, acquired_at = excluded.acquired_at
        WHERE github_hook_locks.lease_until <= CAST(? AS INTEGER)`,
       resource,
       token,
       now + registrationLeaseMs,
+      holder.subscriptionId,
+      token,
+      holder.operation,
+      now,
       now,
     ).rowsWritten === 1
   );
 }
 
 /** Pin before any GitHub mutation: an interrupted mutation needs operator recovery. */
-function pinHookLock(sql: Sql, resource: string, token: string): void {
+function pinHookLock(sql: SqlReader, resource: string, token: string): void {
   const pinned =
     sql.exec(
       `UPDATE github_hook_locks SET lease_until = CAST(? AS INTEGER)
@@ -1005,11 +1138,115 @@ function pinHookLock(sql: Sql, resource: string, token: string): void {
       resource,
       token,
     ).rowsWritten === 1;
-  if (!pinned) throw new Error("hook_lock_lost");
+  if (!pinned) throw new HookFailure("hook_lock_lost");
+}
+
+/**
+ * Pin the lock and mark the reservation as patching in one transaction, so a pinned
+ * registration lock always has a patching record and never strands a preflight attempt.
+ */
+function beginHookMutation(
+  sql: Sql,
+  resource: string,
+  lockToken: string,
+  state: HookMigrationState,
+  recordId: string,
+): HookMigrationState {
+  return sql.transaction((transaction) => {
+    pinHookLock(transaction, resource, lockToken);
+    const patching = startHookMigrationMutation(transaction, state, recordId);
+    if (patching === null)
+      throw new HookFailure("reservation_lost", "The approved webhook replacement lease was lost.");
+    return patching;
+  });
 }
 
 function unlockHook(sql: Sql, resource: string, token: string): void {
   sql.exec("DELETE FROM github_hook_locks WHERE resource = ? AND token = ?", resource, token);
+}
+
+interface HookLockDiagnostic {
+  /** Null when an older version or a pre-0008 lock left no holder bound to this token. */
+  holder: string | null;
+  operation: HookLockOperation | null;
+  lease: LeaseState | null;
+  acquiredAt: string | null;
+  leaseUntil: string | null;
+}
+
+interface HookOwnerDiagnostic {
+  subscriptionId: string | null;
+  hookId: number | null;
+  createdHere: boolean;
+  released: boolean;
+}
+
+interface HookOwnershipDiagnostic {
+  available: boolean;
+  lock: HookLockDiagnostic | null;
+  owners: HookOwnerDiagnostic[];
+}
+
+function safeHookId(value: unknown): number | null {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** Read-only: lock holder, lease and owner rows only, never callback hashes or fingerprints. */
+export function readHookOwnershipDiagnostic(
+  sql: SqlReader,
+  repositoryId: number,
+): HookOwnershipDiagnostic {
+  if (!Number.isSafeInteger(repositoryId) || repositoryId < 1)
+    return { available: false, lock: null, owners: [] };
+  try {
+    const resource = hookResource(repositoryId);
+    const now = Date.now();
+    const lockRow = sql
+      .exec(
+        `SELECT token, lease_until, holder, holder_token, operation, acquired_at
+         FROM github_hook_locks WHERE resource = ?`,
+        resource,
+      )
+      .toArray()[0];
+    let lock: HookLockDiagnostic | null = null;
+    if (lockRow !== undefined) {
+      const bound = lockRow.holder_token !== null && lockRow.holder_token === lockRow.token;
+      const lease = leaseState(lockRow.lease_until, now);
+      lock = {
+        holder:
+          bound && typeof lockRow.holder === "string" && safeSubscriptionId(lockRow.holder)
+            ? lockRow.holder
+            : null,
+        operation:
+          bound && (lockRow.operation === "register" || lockRow.operation === "unregister")
+            ? lockRow.operation
+            : null,
+        lease,
+        acquiredAt: bound ? isoTime(lockRow.acquired_at) : null,
+        leaseUntil: lease === "pinned" ? null : isoTime(lockRow.lease_until),
+      };
+    }
+    const owners = sql
+      .exec(
+        `SELECT subscription_id, hook_id, created_here, released FROM github_hook_owners
+         WHERE resource = ? ORDER BY subscription_id`,
+        resource,
+      )
+      .toArray()
+      .map((row) => ({
+        subscriptionId:
+          typeof row.subscription_id === "string" && safeSubscriptionId(row.subscription_id)
+            ? row.subscription_id
+            : null,
+        hookId: safeHookId(row.hook_id),
+        createdHere: row.created_here === 1,
+        released: row.released === 1,
+      }));
+    return { available: true, lock, owners };
+  } catch {
+    return { available: false, lock: null, owners: [] };
+  }
 }
 
 function saveOwner(
@@ -1091,11 +1328,12 @@ async function discoverHooks(
     );
     requireStatus(result, 200);
     const values = await responseJson(result);
-    if (!Array.isArray(values)) throw new Error("invalid_hook_list");
+    if (!Array.isArray(values))
+      throw new HookFailure("github_invalid_response", "invalid_hook_list");
     hooks.push(...values.map(parseHook));
     if (values.length < 100) return hooks;
   }
-  throw new Error("incomplete_hook_list");
+  throw new HookFailure("hook_list_incomplete", "incomplete_hook_list");
 }
 
 const githubWebhook = {
@@ -1143,10 +1381,7 @@ const githubWebhook = {
     }
     const resource = hookResource(repository.id);
     const lockToken = crypto.randomUUID();
-    let claim:
-      | { kind: "acquired"; state: HookMigrationState }
-      | { kind: "complete"; state: HookMigrationState }
-      | { kind: "blocked" };
+    let claim: ReturnType<typeof claimHookMigration>;
     try {
       claim = claimHookMigration(
         context.sql,
@@ -1159,7 +1394,10 @@ const githubWebhook = {
       throw new Error("GitHub webhook replacement failed; stop for operator recovery.");
     }
     if (claim.kind === "blocked") {
-      recordDetail(context.sql, registration.migrationRecordId, "registration_blocked", "storage");
+      recordDetail(context.sql, registration.migrationRecordId, "registration_blocked", "storage", {
+        reason: claim.reason,
+        httpStatus: null,
+      });
       throw new Error("The approved webhook replacement is already claimed or unresolved.");
     }
 
@@ -1168,8 +1406,11 @@ const githubWebhook = {
       let locked = false;
       let mutationStarted = false;
       try {
-        locked = lockHook(context.sql, resource, lockToken);
-        if (!locked) throw new Error("hook_busy");
+        locked = lockHook(context.sql, resource, lockToken, {
+          subscriptionId,
+          operation: "register",
+        });
+        if (!locked) throw new HookFailure("hook_busy");
         const repo = repository;
         const repoResponse = await githubRequest(
           context,
@@ -1185,7 +1426,7 @@ const githubWebhook = {
           repoValue.id !== repo.id ||
           repoValue.full_name !== repo.fullName
         )
-          throw new Error("repository_mismatch");
+          throw new HookFailure("repository_mismatch");
 
         let hooks = await discoverHooks(context, account, registration.repository, signal);
         let matches = hooks.filter(
@@ -1209,14 +1450,14 @@ const githubWebhook = {
               !Number.isSafeInteger(Number(owner.hook_id)) ||
               Number(owner.hook_id) < 1))
         ) {
-          throw new Error("registration_owner_mismatch");
+          throw new HookFailure("registration_owner_mismatch");
         }
         if (matches.length === 1) {
           if (
             matches[0].callbackUrl !== callbackUrl ||
             (owner !== undefined && Number(owner.hook_id) !== matches[0].id)
           ) {
-            throw new Error("ambiguous_hook");
+            throw new HookFailure("ambiguous_hook");
           }
           const existingHookId = await readApprovedHook(
             context,
@@ -1239,7 +1480,7 @@ const githubWebhook = {
             (hook) =>
               hook.callbackUrl === callbackUrl || hook.callbackUrl === registration.fromCallbackUrl,
           );
-          if (matches.length !== 0) throw new Error("hook_reappeared_during_recovery");
+          if (matches.length !== 0) throw new HookFailure("hook_reappeared_during_recovery");
         }
 
         const previousHookId = owner === undefined ? null : Number(owner.hook_id);
@@ -1248,7 +1489,7 @@ const githubWebhook = {
           ...(previousHookId === null ? [] : [previousHookId]),
         ]);
         if (hooks.some((hook) => recordedHookIds.has(hook.id)))
-          throw new Error("recorded_hook_mismatch");
+          throw new HookFailure("recorded_hook_mismatch");
         const otherOwner = context.sql
           .exec(
             `SELECT subscription_id FROM github_hook_owners
@@ -1260,15 +1501,15 @@ const githubWebhook = {
             previousHookId ?? registration.hookId,
           )
           .toArray()[0];
-        if (otherOwner !== undefined) throw new Error("hook_has_other_owner");
+        if (otherOwner !== undefined) throw new HookFailure("hook_has_other_owner");
 
-        pinHookLock(context.sql, resource, lockToken);
-        const patching = startHookMigrationMutation(
+        const patching = beginHookMutation(
           context.sql,
+          resource,
+          lockToken,
           claim.state,
           registration.migrationRecordId,
         );
-        if (patching === null) throw new Error("The approved webhook replacement lease was lost.");
         mutationStarted = true;
         const created = await githubRequest(
           context,
@@ -1285,7 +1526,7 @@ const githubWebhook = {
         );
         requireStatus(created, 201);
         const saved = parseHook(await responseJson(created));
-        if (!isConfiguredHook(saved, callbackUrl)) throw new Error("creation_unresolved");
+        if (!isConfiguredHook(saved, callbackUrl)) throw new HookFailure("creation_unresolved");
         const savedResponse = await githubRequest(
           context,
           account,
@@ -1296,19 +1537,26 @@ const githubWebhook = {
         requireStatus(savedResponse, 200);
         const hookId = await verifySavedHook(savedResponse, saved.id, callbackUrl);
         if (!replaceRecreatedOwner(context.sql, resource, previousHookId, hookId, identity))
-          throw new Error("The replacement hook owner could not be recorded.");
+          throw new HookFailure(
+            "owner_record_failed",
+            "The replacement hook owner could not be recorded.",
+          );
         if (!completeHookMigration(context.sql, patching, registration.migrationRecordId))
-          throw new Error("The approved webhook replacement could not be recorded.");
+          throw new HookFailure(
+            "completion_record_failed",
+            "The approved webhook replacement could not be recorded.",
+          );
         saveConfiguredRepositories(context.sql, subscriptionId, config);
         recordDetail(context.sql, registration.migrationRecordId, "complete", "hook");
         unlockHook(context.sql, resource, lockToken);
         return { hookId };
-      } catch {
+      } catch (error) {
         recordDetail(
           context.sql,
           registration.migrationRecordId,
           mutationStarted ? "mutation_unresolved" : "preflight_failed",
           "hook",
+          failureDetail(error),
         );
         if (!mutationStarted && locked) {
           try {
@@ -1326,8 +1574,11 @@ const githubWebhook = {
     let path = `${repositoryPath({ fullName: registration.repository })}/hooks/${registration.hookId}`;
     let locked = false;
     try {
-      locked = lockHook(context.sql, resource, lockToken);
-      if (!locked) throw new Error("hook_busy");
+      locked = lockHook(context.sql, resource, lockToken, {
+        subscriptionId,
+        operation: "register",
+      });
+      if (!locked) throw new HookFailure("hook_busy");
       const repo = repository;
       const repoResponse = await githubRequest(
         context,
@@ -1339,18 +1590,18 @@ const githubWebhook = {
       requireStatus(repoResponse, 200);
       const repoValue = await responseJson(repoResponse);
       if (!isRecord(repoValue) || repoValue.id !== repo.id || repoValue.full_name !== repo.fullName)
-        throw new Error("repository_mismatch");
+        throw new HookFailure("repository_mismatch");
       const hooks = await discoverHooks(context, account, registration.repository, signal);
       const matches = hooks.filter(
         (hook) =>
           hook.callbackUrl === callbackUrl || hook.callbackUrl === registration.fromCallbackUrl,
       );
       if (matches.length > 1 || (matches.length === 1 && matches[0].id !== registration.hookId))
-        throw new Error("ambiguous_hook");
+        throw new HookFailure("ambiguous_hook");
       const creating = matches.length === 0;
       // An existing approved ID with a different URL is a mismatch, not permission to create.
       if (creating && hooks.some((hook) => hook.id === registration.hookId))
-        throw new Error("hook_mismatch");
+        throw new HookFailure("hook_mismatch");
       // Never rotate a shared hook to a different callback/secret.
       const owners = context.sql
         .exec(
@@ -1367,7 +1618,7 @@ const githubWebhook = {
               owner.secret_fingerprint !== identity.secretFingerprint),
         )
       )
-        throw new Error("shared_hook_mismatch");
+        throw new HookFailure("shared_hook_mismatch");
       let existing: HookSummary | null = null;
       if (!creating) {
         const existingResponse = await githubRequest(context, account, path, "GET", signal);
@@ -1379,19 +1630,19 @@ const githubWebhook = {
           (!isConfiguredHook(existing, registration.fromCallbackUrl) &&
             !isConfiguredHook(existing, callbackUrl))
         ) {
-          throw new Error("The approved GitHub webhook identity or settings differ.");
+          throw new HookFailure(
+            "hook_identity_mismatch",
+            "The approved GitHub webhook identity or settings differ.",
+          );
         }
       }
-      pinHookLock(context.sql, resource, lockToken);
-      const patching = startHookMigrationMutation(
+      state = beginHookMutation(
         context.sql,
+        resource,
+        lockToken,
         state,
         registration.migrationRecordId,
       );
-      if (patching === null) {
-        throw new Error("The approved webhook replacement lease was lost.");
-      }
-      state = patching;
       mutationStarted = true;
 
       let expectedId = registration.hookId;
@@ -1411,7 +1662,7 @@ const githubWebhook = {
         );
         requireStatus(created, 201);
         const saved = parseHook(await responseJson(created));
-        if (!isConfiguredHook(saved, callbackUrl)) throw new Error("creation_unresolved");
+        if (!isConfiguredHook(saved, callbackUrl)) throw new HookFailure("creation_unresolved");
         expectedId = saved.id;
         path = `${repositoryPath(repo)}/hooks/${expectedId}`;
       } else {
@@ -1432,18 +1683,22 @@ const githubWebhook = {
         creating || owners.some((owner) => owner.created_here === 1),
       );
       if (!completeHookMigration(context.sql, state, registration.migrationRecordId)) {
-        throw new Error("The approved webhook replacement could not be recorded.");
+        throw new HookFailure(
+          "completion_record_failed",
+          "The approved webhook replacement could not be recorded.",
+        );
       }
       saveConfiguredRepositories(context.sql, subscriptionId, config);
       recordDetail(context.sql, registration.migrationRecordId, "complete", "hook");
       unlockHook(context.sql, resource, lockToken);
       return { hookId };
-    } catch {
+    } catch (error) {
       recordDetail(
         context.sql,
         registration.migrationRecordId,
         mutationStarted ? "mutation_unresolved" : "preflight_failed",
         "hook",
+        failureDetail(error),
       );
       if (!mutationStarted) {
         try {
@@ -1483,7 +1738,7 @@ const githubWebhook = {
     const token = crypto.randomUUID();
     let locked: boolean;
     try {
-      locked = lockHook(context.sql, resource, token);
+      locked = lockHook(context.sql, resource, token, { subscriptionId, operation: "unregister" });
     } catch {
       throw new Error("cleanup_unresolved");
     }
@@ -1572,6 +1827,17 @@ const recentReceipts = query(
     readRecentReceipts(context.sql, limit),
 );
 
+const hookOwnershipDiagnostic = query(
+  {
+    title: "Webhook ロックと所有者の安全な診断",
+    description:
+      "リポジトリの数値 ID ごとに、ロックの保持者と期限、所有者行の購読 ID、hook ID、作成元、解放状態だけを読みます。ハッシュや認証情報は返しません。",
+    input: object({ repositoryId: number() }),
+  },
+  async (context: QueryContext<typeof requirements>, { repositoryId }) =>
+    readHookOwnershipDiagnostic(context.sql, repositoryId),
+);
+
 const replacementRegistrationDiagnostic = query(
   {
     title: "置き換え登録の安全な診断",
@@ -1590,6 +1856,7 @@ export default defineApp(requirements, {
     notificationStatus: notificationStatusQuery,
     recoverQueue: recoveryMutation,
     replacementRegistrationDiagnostic,
+    hookOwnershipDiagnostic,
     registrationConfigurationDiagnostic: query(
       {
         description:
@@ -1607,7 +1874,7 @@ export default defineApp(requirements, {
     registrationDetail: query(
       {
         description:
-          "Read fixed registration error codes and field names only; missing detail does not imply success.",
+          "Read fixed registration error codes, field names, failure reasons and HTTP status only; missing detail does not imply success.",
         input: object({ recordId: string() }),
       },
       async (context: QueryContext<typeof requirements>, { recordId }) =>
