@@ -42,7 +42,8 @@ async function createSql() {
       }
       const result = prepared.run(...bindings);
       return {
-        rowsWritten: Number(result.changes),
+        // Durable Object SQLite also counts index writes, so rowsWritten is not a row count.
+        rowsWritten: Number(result.changes) * 2,
         rowsRead: 0,
         toArray: () => [],
         one: () => {

@@ -56,7 +56,8 @@ async function createContext() {
       const result = prepared.run(...bindings);
       return {
         rowsRead: 0,
-        rowsWritten: Number(result.changes),
+        // Durable Object SQLite also counts index writes, so rowsWritten is not a row count.
+        rowsWritten: Number(result.changes) * 2,
         toArray: () => [],
         one: () => {
           throw new Error("statement returned no rows");

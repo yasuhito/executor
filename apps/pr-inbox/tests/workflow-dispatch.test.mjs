@@ -31,7 +31,8 @@ async function fixture() {
         const rows = prepared.all(...bindings);
         return { rowsWritten: 0, toArray: () => rows };
       }
-      return { rowsWritten: Number(prepared.run(...bindings).changes), toArray: () => [] };
+      // Durable Object SQLite also counts index writes, so rowsWritten is not a row count.
+      return { rowsWritten: Number(prepared.run(...bindings).changes) * 2, toArray: () => [] };
     },
     transaction(work) {
       db.exec("BEGIN IMMEDIATE");
