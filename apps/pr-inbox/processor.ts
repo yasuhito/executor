@@ -195,15 +195,18 @@ const dispatchNotificationMutation = mutation(
       return { dispatched: false };
     }
     const owner = { ...input, now: Date.now() } as const;
-    const renewed = context.sql.exec(
-      `UPDATE repository_locks SET lease_until = ?
-       WHERE repository = ? AND run_id = ? AND fencing = ? AND lease_until > ? AND job_delivery_id IS NULL`,
-      owner.now + leaseMs,
-      owner.repository,
-      owner.runId,
-      owner.fencing,
-      owner.now,
-    ).rowsWritten;
+    const renewed = context.sql
+      .exec(
+        `UPDATE repository_locks SET lease_until = ?
+       WHERE repository = ? AND run_id = ? AND fencing = ? AND lease_until > ? AND job_delivery_id IS NULL
+       RETURNING repository`,
+        owner.now + leaseMs,
+        owner.repository,
+        owner.runId,
+        owner.fencing,
+        owner.now,
+      )
+      .toArray().length;
     if (renewed !== 1) return { dispatched: false };
     markSendingNotificationsUnknown(context.sql, owner);
     const notification = claimNextNotification(context.sql, owner);
