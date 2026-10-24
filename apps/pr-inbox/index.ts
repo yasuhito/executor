@@ -651,13 +651,14 @@ function claimHookMigration(
       const inserted = transaction.exec(
         `INSERT INTO github_hook_registrations
           (subscription_id, hook_id, lease_token, lease_until)
-         VALUES (?, CAST(? AS INTEGER), ?, CAST(? AS INTEGER))`,
+         VALUES (?, CAST(? AS INTEGER), ?, CAST(? AS INTEGER))
+         RETURNING subscription_id`,
         recordId,
         hookId,
         encoded,
         now + registrationLeaseMs,
-      ).rowsWritten;
-      return inserted === 1
+      );
+      return inserted.toArray().length === 1
         ? { kind: "acquired", state }
         : { kind: "blocked", reason: "reservation_lost" };
     }
@@ -677,14 +678,15 @@ function claimHookMigration(
       `UPDATE github_hook_registrations
        SET lease_token = ?, lease_until = CAST(? AS INTEGER)
        WHERE subscription_id = ? AND lease_token = ?
-         AND lease_until <= CAST(? AS INTEGER)`,
+         AND lease_until <= CAST(? AS INTEGER)
+       RETURNING subscription_id`,
       encoded,
       now + registrationLeaseMs,
       recordId,
       row.lease_token,
       now,
-    ).rowsWritten;
-    return updated === 1
+    );
+    return updated.toArray().length === 1
       ? { kind: "acquired", state }
       : { kind: "blocked", reason: "reservation_lost" };
   });
@@ -696,15 +698,18 @@ function startHookMigrationMutation(
   recordId: string,
 ): HookMigrationState | null {
   const patching = { ...state, phase: "patching" as const };
-  return sql.exec(
-    `UPDATE github_hook_registrations
-     SET lease_token = ?, lease_until = CAST(? AS INTEGER)
-     WHERE subscription_id = ? AND lease_token = ?`,
-    encodedMigrationState(patching),
-    completedLeaseUntil,
-    recordId,
-    encodedMigrationState(state),
-  ).rowsWritten === 1
+  return sql
+    .exec(
+      `UPDATE github_hook_registrations
+       SET lease_token = ?, lease_until = CAST(? AS INTEGER)
+       WHERE subscription_id = ? AND lease_token = ?
+       RETURNING subscription_id`,
+      encodedMigrationState(patching),
+      completedLeaseUntil,
+      recordId,
+      encodedMigrationState(state),
+    )
+    .toArray().length === 1
     ? patching
     : null;
 }
@@ -712,15 +717,18 @@ function startHookMigrationMutation(
 function completeHookMigration(sql: Sql, state: HookMigrationState, recordId: string): boolean {
   const complete = { ...state, phase: "complete" as const };
   return (
-    sql.exec(
-      `UPDATE github_hook_registrations
-       SET lease_token = ?, lease_until = CAST(? AS INTEGER)
-       WHERE subscription_id = ? AND lease_token = ?`,
-      encodedMigrationState(complete),
-      completedLeaseUntil,
-      recordId,
-      encodedMigrationState(state),
-    ).rowsWritten === 1
+    sql
+      .exec(
+        `UPDATE github_hook_registrations
+         SET lease_token = ?, lease_until = CAST(? AS INTEGER)
+         WHERE subscription_id = ? AND lease_token = ?
+         RETURNING subscription_id`,
+        encodedMigrationState(complete),
+        completedLeaseUntil,
+        recordId,
+        encodedMigrationState(state),
+      )
+      .toArray().length === 1
   );
 }
 
@@ -1107,37 +1115,43 @@ interface HookLockHolder {
 function lockHook(sql: Sql, resource: string, token: string, holder: HookLockHolder): boolean {
   const now = Date.now();
   return (
-    sql.exec(
-      `INSERT INTO github_hook_locks
-         (resource, token, lease_until, holder, holder_token, operation, acquired_at)
-       VALUES (?, ?, CAST(? AS INTEGER), ?, ?, ?, CAST(? AS INTEGER))
-       ON CONFLICT(resource) DO UPDATE
-       SET token = excluded.token, lease_until = excluded.lease_until,
-         holder = excluded.holder, holder_token = excluded.holder_token,
-         operation = excluded.operation, acquired_at = excluded.acquired_at
-       WHERE github_hook_locks.lease_until <= CAST(? AS INTEGER)`,
-      resource,
-      token,
-      now + registrationLeaseMs,
-      holder.subscriptionId,
-      token,
-      holder.operation,
-      now,
-      now,
-    ).rowsWritten === 1
+    sql
+      .exec(
+        `INSERT INTO github_hook_locks
+           (resource, token, lease_until, holder, holder_token, operation, acquired_at)
+         VALUES (?, ?, CAST(? AS INTEGER), ?, ?, ?, CAST(? AS INTEGER))
+         ON CONFLICT(resource) DO UPDATE
+         SET token = excluded.token, lease_until = excluded.lease_until,
+           holder = excluded.holder, holder_token = excluded.holder_token,
+           operation = excluded.operation, acquired_at = excluded.acquired_at
+         WHERE github_hook_locks.lease_until <= CAST(? AS INTEGER)
+         RETURNING resource`,
+        resource,
+        token,
+        now + registrationLeaseMs,
+        holder.subscriptionId,
+        token,
+        holder.operation,
+        now,
+        now,
+      )
+      .toArray().length === 1
   );
 }
 
 /** Pin before any GitHub mutation: an interrupted mutation needs operator recovery. */
 function pinHookLock(sql: SqlReader, resource: string, token: string): void {
   const pinned =
-    sql.exec(
-      `UPDATE github_hook_locks SET lease_until = CAST(? AS INTEGER)
-       WHERE resource = ? AND token = ?`,
-      completedLeaseUntil,
-      resource,
-      token,
-    ).rowsWritten === 1;
+    sql
+      .exec(
+        `UPDATE github_hook_locks SET lease_until = CAST(? AS INTEGER)
+         WHERE resource = ? AND token = ?
+         RETURNING resource`,
+        completedLeaseUntil,
+        resource,
+        token,
+      )
+      .toArray().length === 1;
   if (!pinned) throw new HookFailure("hook_lock_lost");
 }
 
@@ -1280,32 +1294,38 @@ function replaceRecreatedOwner(
   return sql.transaction((transaction) => {
     if (previousHookId === null) {
       return (
-        transaction.exec(
-          `INSERT INTO github_hook_owners
-            (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here)
-           VALUES (?, ?, ?, ?, ?, 1)
-           ON CONFLICT(resource, subscription_id) DO NOTHING`,
-          resource,
-          hookId,
-          identity.subscriptionId,
-          identity.replacementCallbackHash,
-          identity.secretFingerprint,
-        ).rowsWritten === 1
+        transaction
+          .exec(
+            `INSERT INTO github_hook_owners
+              (resource, hook_id, subscription_id, callback_hash, secret_fingerprint, created_here)
+             VALUES (?, ?, ?, ?, ?, 1)
+             ON CONFLICT(resource, subscription_id) DO NOTHING
+             RETURNING resource`,
+            resource,
+            hookId,
+            identity.subscriptionId,
+            identity.replacementCallbackHash,
+            identity.secretFingerprint,
+          )
+          .toArray().length === 1
       );
     }
     return (
-      transaction.exec(
-        `UPDATE github_hook_owners
-         SET hook_id = ?, created_here = 1
-         WHERE resource = ? AND subscription_id = ? AND hook_id = ?
-           AND callback_hash = ? AND secret_fingerprint = ? AND released = 0`,
-        hookId,
-        resource,
-        identity.subscriptionId,
-        previousHookId,
-        identity.replacementCallbackHash,
-        identity.secretFingerprint,
-      ).rowsWritten === 1
+      transaction
+        .exec(
+          `UPDATE github_hook_owners
+           SET hook_id = ?, created_here = 1
+           WHERE resource = ? AND subscription_id = ? AND hook_id = ?
+             AND callback_hash = ? AND secret_fingerprint = ? AND released = 0
+           RETURNING resource`,
+          hookId,
+          resource,
+          identity.subscriptionId,
+          previousHookId,
+          identity.replacementCallbackHash,
+          identity.secretFingerprint,
+        )
+        .toArray().length === 1
     );
   });
 }
