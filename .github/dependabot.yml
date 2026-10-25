@@ -8,6 +8,10 @@ updates:
     directory: /apps/pr-inbox
     schedule:
       interval: weekly
+    ignore:
+      # 0.5.x-0.8.x are a 2014 Heroku app.json tool that once owned the "apps" npm name.
+      - dependency-name: apps
+        versions: ["0.5.x", "0.7.x", "0.8.x"]
   - package-ecosystem: npm
     directory: /apps/review-worker
     schedule:
