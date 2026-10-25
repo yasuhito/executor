@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "apps": "0.0.1-beta.95"
+    "apps": "0.0.1-beta.100"
   },
   "devDependencies": {
     "@types/node": "26.6.5",
